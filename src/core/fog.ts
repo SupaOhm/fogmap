@@ -1,14 +1,18 @@
-import { cellsToMultiPolygon } from 'h3-js';
+import { cellToLatLng, cellsToMultiPolygon } from 'h3-js';
 import type { Feature, MultiPolygon, Position } from 'geojson';
 
-// Web Mercator ends at ~85.05°, so this covers everything MapLibre can show.
-export const WORLD_RING: Position[] = [
-  [-180, -85],
-  [180, -85],
-  [180, 85],
-  [-180, 85],
-  [-180, -85],
+// Web Mercator's limit; MapLibre cannot show anything beyond it.
+const MAX_LAT = 85.051129;
+
+export const WORLD_RING: readonly (readonly [number, number])[] = [
+  [-180, -MAX_LAT],
+  [180, -MAX_LAT],
+  [180, MAX_LAT],
+  [-180, MAX_LAT],
+  [-180, -MAX_LAT],
 ];
+
+export type Bounds = [west: number, south: number, east: number, north: number];
 
 /**
  * Fog as one world polygon with every revealed area as a hole. Unrevealed islands
@@ -21,9 +25,28 @@ export function buildFog(cells: string[]): Feature<MultiPolygon> {
     if (outer) outerRings.push(outer);
     for (const ring of inner) islands.push([ring]);
   }
+  // A fresh copy of the world ring, so callers cannot change the shared one.
+  const world: Position[] = WORLD_RING.map(([lng, lat]) => [lng, lat]);
   return {
     type: 'Feature',
     properties: {},
-    geometry: { type: 'MultiPolygon', coordinates: [[WORLD_RING, ...outerRings], ...islands] },
+    geometry: { type: 'MultiPolygon', coordinates: [[world, ...outerRings], ...islands] },
   };
+}
+
+/** Bounding box of the cell centres, or null without cells. Ignores the antimeridian. */
+export function cellsBounds(cells: readonly string[]): Bounds | null {
+  if (cells.length === 0) return null;
+  let west = Infinity;
+  let south = Infinity;
+  let east = -Infinity;
+  let north = -Infinity;
+  for (const c of cells) {
+    const [lat, lng] = cellToLatLng(c);
+    west = Math.min(west, lng);
+    east = Math.max(east, lng);
+    south = Math.min(south, lat);
+    north = Math.max(north, lat);
+  }
+  return [west, south, east, north];
 }
