@@ -1043,10 +1043,11 @@ describe('areaKm2', () => {
   test('is 0 for no cells', () => {
     expect(areaKm2([])).toBe(0);
   });
-  test('7 res-10 cells cover about 0.105 km²', () => {
+  // Res-10 cells near Bangkok are ~0.0179 km² each, above the 0.0150 km² global average.
+  test('7 res-10 cells near Bangkok cover about 0.125 km²', () => {
     const km2 = areaKm2(gridDisk(latLngToCell(13.7563, 100.5018, H3_RES), 1));
-    expect(km2).toBeGreaterThan(0.09);
-    expect(km2).toBeLessThan(0.12);
+    expect(km2).toBeGreaterThan(0.11);
+    expect(km2).toBeLessThan(0.14);
   });
 });
 
