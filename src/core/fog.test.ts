@@ -17,7 +17,8 @@ test("the world ring reaches Web Mercator's limit", () => {
 test('changing one result does not change the next', () => {
   const first = buildFog([]);
   first.geometry.coordinates[0]![0]![0]![0] = 0;
-  expect(buildFog([]).geometry.coordinates).toEqual([[WORLD_RING]]);
+  expect(buildFog([]).geometry.coordinates[0]![0]![0]).toEqual([-180, -85.051129]);
+  expect(WORLD_RING[0]).toEqual([-180, -85.051129]);
 });
 
 test('one cell becomes one hexagonal hole', () => {
