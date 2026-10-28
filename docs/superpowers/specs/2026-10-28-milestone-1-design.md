@@ -30,18 +30,24 @@ Pure TypeScript, no React or Expo imports, fully unit-tested with Jest.
 | File | Responsibility |
 |---|---|
 | `constants.ts` | `H3_RES = 10`, `REVEAL_RADIUS = 1`, `MAX_ACCURACY_M = 50`, `MAX_SPEED_KMH = 300`, `GAP_MAX_M = 2000`, `GAP_MAX_MS = 600_000`, `WALK_MAX_KMH = 8`, `CYCLE_MAX_KMH = 25` |
-| `types.ts` | `Fix { ts, lat, lng, accuracy, speed: number \| null }`, `SpeedBucket = 'walk' \| 'cycle' \| 'vehicle'`, `LastPoint { cell, ts, lat?, lng? }`, `RejectReason = 'accuracy' \| 'speed'` |
+| `types.ts` | `Fix { ts, lat, lng, accuracy, speed: number \| null }`, `SpeedBucket = 'walk' \| 'cycle' \| 'vehicle'`, `LastPoint { cell, ts, lat?, lng? }`, `RejectReason = 'accuracy' \| 'invalid' \| 'stale' \| 'speed'`, `RevealedCell { bucket, firstTs, lastTs }` |
 | `filter.ts` | `evaluateFix(fix, prev)` returns `{ accepted: true, bucket }` or `{ accepted: false, reason }` |
 | `reveal.ts` | Fix to cell; gap fill from the previous point with `gridPathCells` when under `GAP_MAX_M` and `GAP_MAX_MS`; expand every path cell with `gridDisk(REVEAL_RADIUS)` |
-| `pipeline.ts` | `processFixes(fixes, lastPoint)` returns `{ cells: Map<h3, SpeedBucket>, logRows, nextLastPoint }` |
+| `pipeline.ts` | `processFixes(fixes, lastPoint)` returns `{ cells: Map<h3, RevealedCell>, logRows, nextLastPoint }`; `firstTs`/`lastTs` are the earliest/latest fix times that revealed the cell, so the database sets `first_seen`/`last_seen` from fix time, not wall-clock time |
 | `stats.ts` | Area as the sum of `cellArea` (km²); today / this week / all-time windows using local midnight and a Monday week start; battery %/hour per tracking mode, ignoring intervals where the level rose (charging) |
 | `fog.ts` | `buildFog(cells)` returns GeoJSON: a world-covering polygon with the revealed area (`cellsToMultiPolygon`) as holes |
 | `gpx.ts` | Parse a GPX string into `Fix[]` with accuracy 5 m and `speed: null`; when timestamps are missing, synthesize them at walking pace (5 km/h) |
 | `stress.ts` | Generate N cells along a random walk, for the rendering benchmark |
 
-**Speed check.** With `lat`/`lng` in memory, use the real distance. When only the persisted cell is available (after a relaunch), use the lower-bound distance (cell-centre distance minus the cell's maximum centre-to-vertex distance, floored at 0), so a real fix is never rejected because of cell imprecision.
+**Fix checks, in order** (amended after the Plan 1 final review, 2026-10-28):
+1. `accuracy`: rejected unless accuracy is finite and between 0 and 50 m (on iOS a negative accuracy means the position is invalid).
+2. `invalid`: rejected unless lat/lng are finite and in range.
+3. `stale`: rejected when older than the previous accepted point (iOS can resend cached fixes).
+4. `speed`: only when the gap from the previous point is **under 10 minutes**. Longer gaps are never filled, and checking them would reject every fix for hours after a flight.
 
-**Speed bucket.** Use the fix's reported speed when it is valid (`>= 0`), otherwise the speed computed from the previous point. Gap-filled cells take the bucket of their segment.
+**Speed check distance.** With `lat`/`lng` in memory, use the real distance. When only the persisted cell is available (after a relaunch), use the lower-bound distance (cell-centre distance minus the cell's maximum centre-to-vertex distance, floored at 0), so a real fix is never rejected because of cell imprecision.
+
+**Speed bucket.** Use the fix's reported speed when it is valid (`>= 0`), otherwise the speed computed from the previous point (only within the 10-minute window), otherwise **`vehicle`**. Unknown speed takes the fastest bucket because a cell keeps the slowest bucket it ever had, so any later slower visit can still correct it. Gap-filled cells take the bucket of their segment.
 
 **Tests cover at least:** first fix with no previous point; gap exactly at each limit; a jump over the limits (no fill); the antimeridian; invalid reported speed; runs of rejected fixes; relaunch with a cell-only previous point; slowest-bucket merge; GPX with and without timestamps; battery rate with a charging interval.
 
@@ -82,11 +88,14 @@ Read expo-location's native iOS code to see whether it handles either case. If n
 
 ```sql
 cells(h3 TEXT PRIMARY KEY, first_seen INTEGER, last_seen INTEGER, visit_count INTEGER, mode TEXT)
-track_log(ts INTEGER, accuracy REAL, speed REAL, accepted INTEGER, reject_reason TEXT, tracking_mode TEXT, battery REAL)
+track_log(ts INTEGER, accuracy REAL, speed REAL, accepted INTEGER, reject_reason TEXT, tracking_mode TEXT, battery REAL, charging INTEGER)
 settings(key TEXT PRIMARY KEY, value TEXT)
 ```
 
-- Cell upsert on conflict: update `last_seen`, increment `visit_count`, set `mode` to the slower of the stored and new bucket.
+- Cell upsert from `RevealedCell`: insert with `first_seen = firstTs`, `last_seen = lastTs`; on conflict set `first_seen = MIN(stored, firstTs)`, `last_seen = MAX(stored, lastTs)`, increment `visit_count`, and set `mode` to the slower of the stored and new bucket (this is where the slowest-bucket rule holds across batches).
+- `visit_count` counts **batches that touched the cell**, not distinct visits. It is diagnostic only; nothing in M1 depends on it.
+- `charging` comes from `expo-battery`'s battery state. `batteryRatePerHour` must skip any interval where either end was charging (otherwise a night on the charger counts as zero drain).
+- The previous point is written only through a branded `StoredPoint` type (`{ cell, ts }` produced by `persistable()`), so a `LastPoint` with coordinates cannot be passed to the settings writer by accident.
 - `track_log` rows older than 7 days are pruned at launch and at most once a day by the task.
 - `settings` keys: `tracking_enabled`, `tracking_mode`, `last_point`, `last_error`, `last_error_ts`, `error_count`, `last_prune_ts`.
 - No table has coordinate columns.
@@ -109,7 +118,7 @@ Bottom tabs with expo-router: **Map**, **Stats**, **Debug** (Debug only when the
 - Today's fixes received, accepted, and rejected by reason; last fix time and accuracy; last error and error count.
 - Battery samples and estimated %/hour per mode.
 - Last `buildFog` duration and cell count.
-- GPX import (`expo-document-picker`, then `gpx.ts`, then `processFixes`, then the same database writes as the task).
+- GPX import (`expo-document-picker`, then `gpx.ts`, then `processFixes`, then the same **cell** writes as the task). GPX import runs with `lastPoint = null`, never saves its `nextLastPoint` as the live previous point, and never writes to `track_log`. Otherwise live tracking would reject fixes against the route's (possibly future) timestamps, and battery stats would be corrupted. Synthetic GPX times are placed so the route ends at the import time.
 - Stress fill with N cells (default 50,000).
 - Reset all data, with confirmation.
 
