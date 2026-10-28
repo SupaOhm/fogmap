@@ -130,6 +130,8 @@ If the on-device stress test at 50,000 cells is not acceptable, switch `buildFog
 
 **Measured baseline (2026-10-28, iPhone 14, Debug build, Hermes):** `cellsToMultiPolygon` on 7,651 cells took **3,110 ms** (Node: ~240 ms for 51,000 cells). Debug Hermes is slower than Release, so Plan 2 must measure `buildFog` in a **Release** build early, before the map screen depends on it. If 50,000 cells take more than ~1 s in Release, implement chunking in Plan 2 rather than later.
 
+**Release build (2026-10-29, iPhone 14, Hermes):** buildFog 10k = 2,055 ms, 25k = 5,206 ms, 50k = **10,324 ms** (156 polygons, 62,421 vertices); `cellsToMultiPolygon` on 7,651 cells = 1,377 ms. Cost is linear at ~0.2 ms per cell, about 40× slower than Node. **The 1 s gate fails by ~10×**, and even a typical few thousand cells would block the JS thread for over half a second per rebuild. Next step is the user's decision (Plan 2, Task 1 gate).
+
 ## Verification
 
 | Acceptance criterion | How it is checked |
