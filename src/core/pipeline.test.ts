@@ -23,7 +23,9 @@ test('no fixes changes nothing', () => {
 test('a single fix reveals its cell and 6 neighbours', () => {
   const r = processFixes([fix()], null);
   expect(new Set(r.cells.keys())).toEqual(new Set(gridDisk(cellAt(LAT, LNG), 1)));
-  expect([...r.cells.values()].every((b) => b === 'walk')).toBe(true);
+  for (const v of r.cells.values()) {
+    expect(v).toEqual({ bucket: 'vehicle', firstTs: 0, lastTs: 0 });
+  }
   expect(r.logRows).toEqual([{ ts: 0, accuracy: 10, speed: null, accepted: true, rejectReason: null }]);
   expect(r.nextLastPoint).toEqual({ cell: cellAt(LAT, LNG), ts: 0, lat: LAT, lng: LNG });
 });
@@ -63,7 +65,30 @@ test('fixes are processed in time order', () => {
 
 test('a cell revisited at walking speed is stored as walk', () => {
   const r = processFixes([fix({ speed: 20 }), fix({ ts: 60_000, speed: 1 })], null);
-  expect(r.cells.get(cellAt(LAT, LNG))).toBe('walk');
+  const cell = r.cells.get(cellAt(LAT, LNG));
+  expect(cell?.bucket).toBe('walk');
+  expect(cell?.firstTs).toBe(0);
+  expect(cell?.lastTs).toBe(60_000);
+});
+
+test('a slow visit is not overwritten by a later fast one', () => {
+  const r = processFixes([fix({ speed: 1 }), fix({ ts: 60_000, speed: 20 })], null);
+  expect(r.cells.get(cellAt(LAT, LNG))?.bucket).toBe('walk');
+});
+
+test('an invalid fix is rejected without losing the rest of the batch', () => {
+  const run = () =>
+    processFixes([fix(), fix({ ts: 1_000, lat: NaN }), fix({ ts: 2_000, lng: LNG + 0.0001 })], null);
+  expect(run).not.toThrow();
+  const r = run();
+  expect(r.logRows.map((l) => l.rejectReason)).toEqual([null, 'invalid', null]);
+  expect(r.nextLastPoint?.ts).toBe(2_000);
+});
+
+test('reveals after a long gap even if the implied speed is impossible', () => {
+  const r = processFixes([fix(), fix({ ts: 13 * 3_600_000, lat: 51.47, lng: -0.4543 })], null);
+  expect(r.logRows.every((l) => l.accepted)).toBe(true);
+  expect(r.cells.size).toBe(14);
 });
 
 test('gap filling still works from a persisted (cell-only) previous point', () => {

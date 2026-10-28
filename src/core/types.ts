@@ -9,7 +9,10 @@ export type Fix = {
 
 export type SpeedBucket = 'walk' | 'cycle' | 'vehicle';
 
-export type RejectReason = 'accuracy' | 'speed';
+export type RejectReason = 'accuracy' | 'invalid' | 'stale' | 'speed';
+
+/** One cell revealed by a batch: slowest bucket, and the earliest/latest fix time that revealed it. */
+export type RevealedCell = { bucket: SpeedBucket; firstTs: number; lastTs: number };
 
 /**
  * The previous accepted point. lat/lng exist only in memory; after a relaunch

@@ -27,9 +27,46 @@ describe('accuracy', () => {
   });
 });
 
+describe('validity', () => {
+  test('rejects negative accuracy', () => {
+    expect(evaluateFix(fix({ accuracy: -1 }), null)).toEqual({ accepted: false, reason: 'accuracy' });
+  });
+  test('rejects NaN accuracy', () => {
+    expect(evaluateFix(fix({ accuracy: NaN }), null)).toEqual({ accepted: false, reason: 'accuracy' });
+  });
+  test('rejects NaN latitude', () => {
+    expect(evaluateFix(fix({ lat: NaN }), null)).toEqual({ accepted: false, reason: 'invalid' });
+  });
+  test('rejects latitude 95', () => {
+    expect(evaluateFix(fix({ lat: 95 }), null)).toEqual({ accepted: false, reason: 'invalid' });
+  });
+  test('rejects longitude 181', () => {
+    expect(evaluateFix(fix({ lng: 181 }), null)).toEqual({ accepted: false, reason: 'invalid' });
+  });
+  test('rejects a fix older than the previous point', () => {
+    expect(evaluateFix(fix({ ts: 5_000 }), exactPrev(10_000))).toEqual({
+      accepted: false,
+      reason: 'stale',
+    });
+  });
+});
+
+describe('long gaps', () => {
+  const LONDON = { lat: 51.47, lng: -0.4543, ts: 13 * 3_600_000 };
+  test('no speed check after a flight; unknown speed is vehicle', () => {
+    expect(evaluateFix(fix(LONDON), exactPrev(0))).toEqual({ accepted: true, bucket: 'vehicle' });
+  });
+  test('a valid reported speed is still used after a long gap', () => {
+    expect(evaluateFix(fix({ ...LONDON, speed: 1.2 }), exactPrev(0))).toEqual({
+      accepted: true,
+      bucket: 'walk',
+    });
+  });
+});
+
 describe('first fix (no previous point)', () => {
-  test('without speed is bucketed as walk', () => {
-    expect(evaluateFix(fix(), null)).toEqual({ accepted: true, bucket: 'walk' });
+  test('without speed is bucketed as vehicle', () => {
+    expect(evaluateFix(fix(), null)).toEqual({ accepted: true, bucket: 'vehicle' });
   });
   test('uses reported speed', () => {
     expect(evaluateFix(fix({ speed: 10 }), null)).toEqual({ accepted: true, bucket: 'vehicle' });
@@ -56,8 +93,8 @@ describe('speed check', () => {
 
 describe('speed bucket', () => {
   test('falls back to computed speed when reported speed is negative', () => {
-    // 1081 m in 10 min is ~6.5 km/h
-    expect(evaluateFix(fix({ ts: 600_000, lng: EAST_1KM, speed: -1 }), exactPrev(0))).toEqual({
+    // 1081 m in 599 s is ~6.5 km/h
+    expect(evaluateFix(fix({ ts: 599_000, lng: EAST_1KM, speed: -1 }), exactPrev(0))).toEqual({
       accepted: true,
       bucket: 'walk',
     });

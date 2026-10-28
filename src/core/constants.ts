@@ -1,4 +1,4 @@
-/** H3 resolution for stored cells (~66 m edge). */
+/** H3 resolution for stored cells (~76 m average edge; ~83 m near Bangkok). */
 export const H3_RES = 10;
 /** Each revealed path cell also reveals neighbours within this many rings. */
 export const REVEAL_RADIUS = 1;

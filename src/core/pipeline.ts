@@ -4,10 +4,10 @@ import { H3_RES } from './constants';
 import { evaluateFix } from './filter';
 import { distanceFromPrevM } from './geo';
 import { expandCells, pathCells, shouldFillGap } from './reveal';
-import type { Fix, LastPoint, LogRow, SpeedBucket } from './types';
+import type { Fix, LastPoint, LogRow, RevealedCell } from './types';
 
 export type PipelineResult = {
-  cells: Map<string, SpeedBucket>;
+  cells: Map<string, RevealedCell>;
   logRows: LogRow[];
   nextLastPoint: LastPoint | null;
 };
@@ -17,7 +17,7 @@ export type PipelineResult = {
  * tracking and GPX import so both reveal exactly the same cells.
  */
 export function processFixes(fixes: readonly Fix[], lastPoint: LastPoint | null): PipelineResult {
-  const cells = new Map<string, SpeedBucket>();
+  const cells = new Map<string, RevealedCell>();
   const logRows: LogRow[] = [];
   let prev = lastPoint;
 
@@ -37,7 +37,16 @@ export function processFixes(fixes: readonly Fix[], lastPoint: LastPoint | null)
       prev !== null && shouldFillGap(distanceFromPrevM(prev, fix.lat, fix.lng), fix.ts - prev.ts);
     for (const c of expandCells(pathCells(prev?.cell ?? null, cell, fill))) {
       const existing = cells.get(c);
-      cells.set(c, existing ? slowerBucket(existing, verdict.bucket) : verdict.bucket);
+      cells.set(
+        c,
+        existing
+          ? {
+              bucket: slowerBucket(existing.bucket, verdict.bucket),
+              firstTs: Math.min(existing.firstTs, fix.ts),
+              lastTs: Math.max(existing.lastTs, fix.ts),
+            }
+          : { bucket: verdict.bucket, firstTs: fix.ts, lastTs: fix.ts },
+      );
     }
     prev = { cell, ts: fix.ts, lat: fix.lat, lng: fix.lng };
   }
