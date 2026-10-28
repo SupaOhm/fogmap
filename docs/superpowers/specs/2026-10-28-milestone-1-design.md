@@ -128,6 +128,8 @@ Use option A: rebuild the whole fog shape (debounced, foreground only). Expected
 
 If the on-device stress test at 50,000 cells is not acceptable, switch `buildFog` internally to chunking: group cells by a coarse parent cell, cache each group's outline, rebuild only touched groups. Callers do not change.
 
+**Measured baseline (2026-10-28, iPhone 14, Debug build, Hermes):** `cellsToMultiPolygon` on 7,651 cells took **3,110 ms** (Node: ~240 ms for 51,000 cells). Debug Hermes is slower than Release, so Plan 2 must measure `buildFog` in a **Release** build early, before the map screen depends on it. If 50,000 cells take more than ~1 s in Release, implement chunking in Plan 2 rather than later.
+
 ## Verification
 
 | Acceptance criterion | How it is checked |
