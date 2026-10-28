@@ -374,6 +374,328 @@ git commit -m "feat(core): fog world ring at Mercator limit, cellsBounds, fog be
    - If 50,000 cells take **≤ 1,000 ms**, continue with Task 2.
    - If they take **more**, stop and report to the user before continuing. Chunking by parent cell has a visible side effect: the soft-edge line would also draw along every chunk boundary inside revealed areas. So it needs the user's decision, for example chunking without the soft edge, or accepting the delay. Then add the chosen task to this plan.
 
+### Task 1b: Fast incremental fog builder (added after the Task 1 gate failed)
+
+**Why:** On the iPhone (Release, Hermes) `buildFog` took 10,324 ms for 50,000 cells; nearly all of it is h3's `cellsToMultiPolygon`. This task replaces its internals with an edge-cancellation outline that needs one cheap h3 call per cell (`cellToVertexes`), can add cells incrementally, fixes nesting (a revealed spot inside an unrevealed island was fogged by the island polygon), and emits RFC 7946 winding (exterior rings counter-clockwise, holes clockwise). Callers of `buildFog` do not change.
+
+**How it works:**
+- Each cell's vertices come counter-clockwise from `cellToVertexes`, and neighbours share the same H3 vertex ids (both verified).
+- Adding a cell adds its directed edges `from → to`. If the reverse edge `to → from` is already open, the two cancel, because it is a shared interior edge.
+- What stays open is exactly the boundary of the revealed area. In a hex grid, three cells meet at every vertex, so each vertex has at most one open outgoing edge, and a `Map<from, to>` is enough.
+- Following `next` pointers gives closed rings. Revealed outlines run counter-clockwise (positive area) and unrevealed islands clockwise.
+- Each revealed outline becomes a hole in the innermost island that contains it, or in the world polygon if there is none.
+- All found rings are reversed on output (RFC 7946 winding).
+- In Node this matched `cellsToMultiPolygon` ring for ring (same vertex sets) on 10k and 50k stress cells.
+
+**Files:**
+- Modify: `src/core/fog.ts`, `src/core/fog.test.ts`
+
+**Interfaces:**
+- Keeps: `WORLD_RING`, `Bounds`, `cellsBounds` (unchanged).
+- `buildFog(cells: Iterable<string>): Feature<MultiPolygon>`. The parameter widens from `string[]`; output structure is unchanged: `[[world, ...revealedHoles], ...islandPolygons]`.
+- New:
+  ```ts
+  export class FogBuilder {
+    get size(): number;                       // cells added so far
+    add(cells: Iterable<string>): void;       // duplicates ignored
+    reset(): void;
+    toFeature(): Feature<MultiPolygon>;
+  }
+  ```
+
+- [ ] **Step 1: Write the failing tests**
+
+In `src/core/fog.test.ts`:
+1. Change the h3 import to `import { cellToLatLng, cellsToMultiPolygon, gridDisk, latLngToCell } from 'h3-js';`.
+2. Add `import type { Feature, MultiPolygon, Position } from 'geojson';` and `import { stressCells } from './stress';`.
+3. Change the fog import to `import { FogBuilder, WORLD_RING, buildFog, cellsBounds } from './fog';`.
+4. Add these helpers below `const centre = ...`:
+
+```ts
+const BANGKOK = { lat: 13.7563, lng: 100.5018 };
+
+/** Order-independent key of a closed ring: its vertices, rounded and sorted. */
+const ringKey = (ring: Position[]) =>
+  ring
+    .slice(0, -1)
+    .map(([lng, lat]) => `${lng!.toFixed(7)},${lat!.toFixed(7)}`)
+    .sort()
+    .join(';');
+
+/** Order-independent shape of a fog feature, for comparing builds. */
+const shape = (f: Feature<MultiPolygon>) =>
+  f.geometry.coordinates.map((polygon) => polygon.map(ringKey).join('|')).sort();
+
+const signedArea = (ring: Position[]) => {
+  let a = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    a += ring[i]![0]! * ring[i + 1]![1]! - ring[i + 1]![0]! * ring[i]![1]!;
+  }
+  return a / 2;
+};
+```
+
+5. Add these tests after `'holes use GeoJSON [lng, lat] order'`:
+
+```ts
+test('a revealed cell inside an unrevealed island is a hole in that island', () => {
+  const inner = gridDisk(centre, 1);
+  const revealed = [...gridDisk(centre, 2).filter((c) => !inner.includes(c)), centre];
+  const coords = buildFog(revealed).geometry.coordinates;
+  expect(coords).toHaveLength(2);
+  expect(coords[0]).toHaveLength(2); // world + outer edge of the revealed ring
+  expect(coords[1]).toHaveLength(2); // the unrevealed island, with the centre cell as its hole
+  expect(coords[1]![1]).toHaveLength(7);
+});
+
+test('rings follow RFC 7946: exteriors counter-clockwise, holes clockwise', () => {
+  const inner = gridDisk(centre, 1);
+  const revealed = [...gridDisk(centre, 2).filter((c) => !inner.includes(c)), centre];
+  for (const polygon of buildFog(revealed).geometry.coordinates) {
+    expect(signedArea(polygon[0]!)).toBeGreaterThan(0);
+    for (const hole of polygon.slice(1)) expect(signedArea(hole)).toBeLessThan(0);
+  }
+});
+
+test('outlines match h3 cellsToMultiPolygon on a long route', () => {
+  const cells = stressCells(10_000, 1, BANGKOK);
+  const [[, ...holes], ...islands] = buildFog(cells).geometry.coordinates;
+  const ours = [...holes!, ...islands.flat()];
+  const reference = cellsToMultiPolygon(cells, true).flat();
+  expect(ours.length).toBeGreaterThan(1); // the route has islands, so this is not trivial
+  expect(ours).toHaveLength(reference.length);
+  expect(new Set(ours.map(ringKey))).toEqual(new Set(reference.map(ringKey)));
+});
+
+describe('FogBuilder', () => {
+  test('adding cells in batches gives the same fog as all at once', () => {
+    const cells = stressCells(2000, 3, BANGKOK);
+    const builder = new FogBuilder();
+    builder.add(cells.slice(0, 700));
+    builder.add(cells.slice(700));
+    expect(builder.size).toBe(2000);
+    expect(shape(builder.toFeature())).toEqual(shape(buildFog(cells)));
+  });
+
+  test('adding a cell twice changes nothing', () => {
+    const builder = new FogBuilder();
+    builder.add([centre]);
+    builder.add([centre, centre]);
+    expect(builder.size).toBe(1);
+    expect(shape(builder.toFeature())).toEqual(shape(buildFog([centre])));
+  });
+
+  test('a later cell can fill an island', () => {
+    const builder = new FogBuilder();
+    builder.add(gridDisk(centre, 1).filter((c) => c !== centre));
+    expect(builder.toFeature().geometry.coordinates).toHaveLength(2);
+    builder.add([centre]);
+    expect(builder.toFeature().geometry.coordinates).toHaveLength(1);
+  });
+
+  test('reset clears every cell', () => {
+    const builder = new FogBuilder();
+    builder.add(gridDisk(centre, 1));
+    builder.reset();
+    expect(builder.size).toBe(0);
+    expect(builder.toFeature().geometry.coordinates).toEqual([[WORLD_RING]]);
+  });
+});
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `rtk proxy npx jest src/core/fog.test.ts`
+Expected: FAIL. `FogBuilder` is not a constructor; the nesting test fails (the island has 1 ring, not 2); the RFC test fails (h3 holes are counter-clockwise).
+
+- [ ] **Step 3: Implement**
+
+In `src/core/fog.ts`:
+- change the h3 import to `import { cellToLatLng, cellToVertexes, vertexToLatLng } from 'h3-js';`;
+- keep `MAX_LAT`, `WORLD_RING`, `Bounds` and `cellsBounds` exactly as they are;
+- replace the `buildFog` function and its doc comment with:
+
+```ts
+type LngLat = [number, number];
+type Ring = { coords: LngLat[]; area: number; west: number; south: number; east: number; north: number };
+
+/**
+ * Fog outline built incrementally. Each revealed cell adds its edges (H3 gives
+ * vertices counter-clockwise, and neighbours share vertex ids); an edge shared
+ * with a revealed neighbour cancels out, so the open edges are exactly the
+ * boundary of the revealed area. Needs one cheap h3 call per cell, unlike
+ * cellsToMultiPolygon, which is ~10 s for 50k cells on Hermes. Ignores the antimeridian.
+ */
+export class FogBuilder {
+  private readonly cells = new Set<string>();
+  /** Open boundary edges, from vertex → to vertex. At most one per vertex: three cells meet at each. */
+  private readonly edges = new Map<string, string>();
+  private readonly vertexCoords = new Map<string, LngLat>();
+
+  get size(): number {
+    return this.cells.size;
+  }
+
+  add(cells: Iterable<string>): void {
+    for (const cell of cells) {
+      if (this.cells.has(cell)) continue;
+      this.cells.add(cell);
+      const vertices = cellToVertexes(cell);
+      for (let i = 0; i < vertices.length; i++) {
+        const from = vertices[i]!;
+        const to = vertices[(i + 1) % vertices.length]!;
+        if (this.edges.get(to) === from) {
+          this.edges.delete(to);
+        } else if (this.edges.has(from)) {
+          throw new Error(`fog outline touches itself at vertex ${from}`);
+        } else {
+          this.edges.set(from, to);
+        }
+      }
+    }
+  }
+
+  reset(): void {
+    this.cells.clear();
+    this.edges.clear();
+    this.vertexCoords.clear();
+  }
+
+  /**
+   * Fog as one world polygon with every revealed area as a hole; each unrevealed
+   * island is its own polygon, with the revealed areas inside it as holes.
+   * Exterior rings are counter-clockwise and holes clockwise (RFC 7946).
+   */
+  toFeature(): Feature<MultiPolygon> {
+    const outlines: Ring[] = [];
+    const islands: Ring[] = [];
+    for (const ring of this.rings()) (ring.area > 0 ? outlines : islands).push(ring);
+
+    const worldHoles: Position[][] = [];
+    const islandHoles = islands.map((): Position[][] => []);
+    for (const outline of outlines) {
+      const i = innermostContaining(islands, outline.coords[0]!);
+      (i === -1 ? worldHoles : islandHoles[i]!).push(reversedClosed(outline.coords));
+    }
+
+    // A fresh copy of the world ring, so callers cannot change the shared one.
+    const world: Position[] = WORLD_RING.map(([lng, lat]) => [lng, lat]);
+    return {
+      type: 'Feature',
+      properties: {},
+      geometry: {
+        type: 'MultiPolygon',
+        coordinates: [
+          [world, ...worldHoles],
+          ...islands.map((island, i) => [reversedClosed(island.coords), ...islandHoles[i]!]),
+        ],
+      },
+    };
+  }
+
+  /** Follows the open edges into closed rings. Revealed outlines come out counter-clockwise, islands clockwise. */
+  private rings(): Ring[] {
+    const next = new Map(this.edges);
+    const rings: Ring[] = [];
+    for (const start of this.edges.keys()) {
+      if (!next.has(start)) continue;
+      const coords: LngLat[] = [];
+      let v = start;
+      do {
+        coords.push(this.coord(v));
+        const to = next.get(v);
+        if (to === undefined) throw new Error(`fog outline is not closed at vertex ${v}`);
+        next.delete(v);
+        v = to;
+      } while (v !== start);
+      rings.push(measure(coords));
+    }
+    return rings;
+  }
+
+  private coord(vertex: string): LngLat {
+    let c = this.vertexCoords.get(vertex);
+    if (!c) {
+      const [lat, lng] = vertexToLatLng(vertex);
+      c = [lng, lat];
+      this.vertexCoords.set(vertex, c);
+    }
+    return c;
+  }
+}
+
+/** Fog for a set of revealed cells (see FogBuilder). */
+export function buildFog(cells: Iterable<string>): Feature<MultiPolygon> {
+  const builder = new FogBuilder();
+  builder.add(cells);
+  return builder.toFeature();
+}
+
+function measure(coords: LngLat[]): Ring {
+  let twiceArea = 0;
+  let west = Infinity;
+  let south = Infinity;
+  let east = -Infinity;
+  let north = -Infinity;
+  for (let i = 0; i < coords.length; i++) {
+    const [x1, y1] = coords[i]!;
+    const [x2, y2] = coords[(i + 1) % coords.length]!;
+    twiceArea += x1 * y2 - x2 * y1;
+    west = Math.min(west, x1);
+    east = Math.max(east, x1);
+    south = Math.min(south, y1);
+    north = Math.max(north, y1);
+  }
+  return { coords, area: twiceArea / 2, west, south, east, north };
+}
+
+/** Index of the smallest island containing the point, or -1. Outlines never touch islands, so any vertex decides. */
+function innermostContaining(islands: Ring[], [x, y]: LngLat): number {
+  let best = -1;
+  for (let i = 0; i < islands.length; i++) {
+    const r = islands[i]!;
+    if (x < r.west || x > r.east || y < r.south || y > r.north || !pointInRing(r.coords, x, y)) continue;
+    if (best === -1 || Math.abs(r.area) < Math.abs(islands[best]!.area)) best = i;
+  }
+  return best;
+}
+
+function pointInRing(ring: LngLat[], x: number, y: number): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i]!;
+    const [xj, yj] = ring[j]!;
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/** The ring reversed (flips its winding) and closed with its first point. */
+function reversedClosed(coords: LngLat[]): Position[] {
+  const out: Position[] = coords.map(([lng, lat]) => [lng, lat]).reverse();
+  out.push([...out[0]!]);
+  return out;
+}
+```
+
+If `cellsToMultiPolygon` is no longer used in `fog.ts`, it must not be imported there (it stays in the test as the reference).
+
+- [ ] **Step 4: Run the tests**
+
+Run: `rtk proxy npx jest src/core/fog.test.ts`, then `rtk proxy npx jest && npm run typecheck`.
+Expected: all pass (16 tests in fog.test.ts), typecheck clean. `src/core/fogBenchmark.test.ts` must still pass unchanged.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/core/fog.ts src/core/fog.test.ts
+git commit -m "perf(core): incremental edge-cancellation fog builder; nested islands, RFC 7946 winding"
+```
+
+- [ ] **Step 6: Device re-measure (controller and user)**
+
+Release build, then run the same benchmark button. Record the numbers in the spec under the Task 1 Release line. Gate as in Task 1: if 50,000 cells take ≤ 1,000 ms, continue with Task 2; otherwise report to the user.
+
 ---
 
 ### Task 2: Database foundation (Db interface, schema, migrations)
