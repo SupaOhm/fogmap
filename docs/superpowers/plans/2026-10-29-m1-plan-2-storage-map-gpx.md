@@ -2645,3 +2645,237 @@ git commit -m "chore: script to generate a synthetic GPX test route"
    - **Resolution 10 look:** take a screenshot zoomed into a street-level part of the corridor, for the open question on resolution.
 4. Record the results in the spec, in a new subsection `### Plan 2 device results (YYYY-MM-DD, Release)` under "Fog performance": GPX cells and refresh ms, corridor gaps yes/no, 50k first-load ms, small-update ms at 50k, panning smooth yes/no, soft edge kept or removed, and the user's first impression of resolution 10.
 5. Commit with `docs(spec): record Plan 2 device results`.
+
+---
+
+### Task 9: Wider reveal, coarse fog when zoomed out, ground-width soft edge (added after the Task 8 device check)
+
+**Why:** On device the user found the revealed area too narrow ("road wide"), and zoomed out it read as lines instead of places visited; the fixed 14 px soft edge also painted narrow corridors darker than the fog. User decision ("both"):
+1. `REVEAL_RADIUS` 1 → 2 (corridor ~650 m instead of ~400 m).
+2. Below zoom 12, draw the fog from the res-8 parents of the stored cells (~1 km hexagons). From zoom 12, draw the stored res-10 cells as now. Storage stays res-10 cells only.
+3. The soft edge keeps a constant width on the ground (exponential zoom interpolation), so it is invisible when zoomed out and ~14 px at street level.
+
+**Files:**
+- Modify: `src/core/constants.ts`, `src/core/reveal.test.ts`, `src/core/pipeline.test.ts`, `src/core/fog.ts`, `src/core/fog.test.ts`, `src/config.ts`, `src/map/fogSource.ts`, `src/map/fogSource.test.ts`, `src/map/fogStyle.ts`, `src/map/useFog.ts`, `src/screens/MapScreen.tsx`
+
+**Interfaces:**
+- Consumes: `FogBuilder`, `buildFog` (`src/core/fog.ts`), `FogSource`, `FogUpdate` (`src/map/fogSource.ts`), `useFog`, `FogState` (`src/map/useFog.ts`), `Layer` from MapLibre 11 (its props include style-spec `minzoom` / `maxzoom`: a layer shows at `minzoom <= zoom < maxzoom`).
+- Produces:
+  - `REVEAL_RADIUS = 2`
+  - `export function parentCells(cells: Iterable<string>, res: number): string[]` in `src/core/fog.ts` (unique parents, first-seen order)
+  - `src/config.ts`: `COARSE_FOG_RES = 8`, `FINE_FOG_MIN_ZOOM = 12`
+  - `FogUpdate` gains `coarseFog: Feature<MultiPolygon>`; `FogState` gains `coarseFog`
+  - `src/map/fogStyle.ts`: `FOG_FILL_PAINT` (unchanged), `FINE_EDGE_PAINT`, `COARSE_EDGE_PAINT` (replace `FOG_EDGE_PAINT`)
+
+- [ ] **Step 1: Wider reveal (tests first)**
+
+In `src/core/reveal.test.ts`, replace the `expandCells` describe block with:
+
+```ts
+describe('expandCells', () => {
+  test('by default one cell expands to itself plus two rings (19 cells)', () => {
+    expect(expandCells([a]).size).toBe(19);
+  });
+  test('radius 1: one cell expands to itself plus 6 neighbours', () => {
+    expect(expandCells([a], 1).size).toBe(7);
+  });
+  test('radius 1: two adjacent cells expand to 10 unique cells', () => {
+    const neighbour = gridDisk(a, 1).find((c) => c !== a)!;
+    expect(expandCells([a, neighbour], 1).size).toBe(10);
+  });
+  test('radius 0 keeps only the input cells', () => {
+    expect([...expandCells([a, b], 0)].sort()).toEqual([a, b].sort());
+  });
+});
+```
+
+In `src/core/pipeline.test.ts`:
+- change the import to `import { H3_RES, REVEAL_RADIUS } from './constants';`
+- rename `'a single fix reveals its cell and 6 neighbours'` to `'a single fix reveals its cell and the rings around it'`, and change its `gridDisk(cellAt(LAT, LNG), 1)` to `gridDisk(cellAt(LAT, LNG), REVEAL_RADIUS)`;
+- in `'two fixes within limits reveal the corridor between them'`, change `toBeGreaterThan(14)` to `toBeGreaterThan(38)`;
+- in `'a jump beyond the limits is not filled'` and `'reveals after a long gap even if the implied speed is impossible'`, change `toBe(14)` to `toBe(38)` (two separate 19-cell disks).
+
+Run: `rtk proxy npx jest src/core/reveal.test.ts src/core/pipeline.test.ts`
+Expected: FAIL (default radius is still 1: 7 instead of 19, 14 instead of 38).
+
+In `src/core/constants.ts` replace the REVEAL_RADIUS lines with:
+
+```ts
+/** Each revealed path cell also reveals neighbours within this many rings (2 → corridor ~650 m wide at res 10). */
+export const REVEAL_RADIUS = 2;
+```
+
+Run: `rtk proxy npx jest`
+Expected: all pass. If any other test hard-codes a one-ring count, update it to the two-ring count and say so in the report.
+
+- [ ] **Step 2: `parentCells` (tests first)**
+
+Add to `src/core/fog.test.ts` (add `cellToParent` and `getResolution` to the h3-js import and `parentCells` to the fog import):
+
+```ts
+describe('parentCells', () => {
+  test('maps cells to their unique parents at the given resolution', () => {
+    const disk = gridDisk(centre, 2);
+    const parents = parentCells(disk, 8);
+    expect(new Set(parents)).toEqual(new Set(disk.map((c) => cellToParent(c, 8))));
+    expect(parents.length).toBe(new Set(parents).size);
+    expect(parents.every((p) => getResolution(p) === 8)).toBe(true);
+  });
+  test('is empty without cells', () => {
+    expect(parentCells([], 8)).toEqual([]);
+  });
+});
+```
+
+Run: `rtk proxy npx jest src/core/fog.test.ts`
+Expected: FAIL: `parentCells` is not a function.
+
+In `src/core/fog.ts`, add `cellToParent` to the h3-js import and add below `cellsBounds`:
+
+```ts
+/** The unique parents of cells at a coarser resolution, in first-seen order (coarse fog when zoomed out). */
+export function parentCells(cells: Iterable<string>, res: number): string[] {
+  const parents = new Set<string>();
+  for (const c of cells) parents.add(cellToParent(c, res));
+  return [...parents];
+}
+```
+
+Run: `rtk proxy npx jest src/core/fog.test.ts`
+Expected: PASS.
+
+- [ ] **Step 3: Coarse fog in `FogSource` (tests first)**
+
+Add to `src/config.ts`:
+
+```ts
+/** Below FINE_FOG_MIN_ZOOM the fog is drawn from the stored cells' parents at this resolution (~1 km hexagons). */
+export const COARSE_FOG_RES = 8;
+export const FINE_FOG_MIN_ZOOM = 12;
+```
+
+In `src/map/fogSource.test.ts`:
+- change the fog import to `import { buildFog, cellsBounds, parentCells } from '../core/fog';` and add `import { COARSE_FOG_RES } from '../config';`
+- add a helper below `shape`:
+
+```ts
+const coarse = (cells: string[]) => shape(buildFog(parentCells(cells, COARSE_FOG_RES)));
+```
+
+- in `'the first refresh adds every stored cell'` add `expect(shape(update.coarseFog)).toEqual(coarse(CELLS));`
+- in `'later refreshes add only new cells and match a full build'` add `expect(shape(update.coarseFog)).toEqual(coarse(CELLS));`
+- in `'after markReset the next refresh starts from scratch, though rowids restarted'` add `expect(shape(update.coarseFog)).toEqual(coarse(CELLS.slice(0, 50)));`
+- in `'a reset to an empty table gives the all-fog world'` add `expect(update.coarseFog.geometry).toEqual(buildFog([]).geometry);`
+
+Run: `rtk proxy npx jest src/map/fogSource.test.ts`
+Expected: FAIL (`coarseFog` is undefined; TypeScript errors are acceptable as the failure here).
+
+In `src/map/fogSource.ts`:
+- imports: `import { COARSE_FOG_RES } from '../config';` and add `parentCells` to the `../core/fog` import;
+- `FogUpdate` gains, after `fog`:
+
+```ts
+  /** The same fog from the cells' res-COARSE_FOG_RES parents, for zoomed-out views. */
+  coarseFog: Feature<MultiPolygon>;
+```
+
+- add a field `private readonly coarse = new FogBuilder();` below `builder`;
+- in the reset branch add `this.coarse.reset();`
+- in the slice loop, after `this.builder.add(slice);`, add `this.coarse.add(parentCells(slice, COARSE_FOG_RES));`
+- after `const fog = this.builder.toFeature();` add `const coarseFog = this.coarse.toFeature();`
+- return `{ fog, coarseFog, cellCount: this.builder.size, ... }` (the rest unchanged).
+
+Run: `rtk proxy npx jest src/map/fogSource.test.ts`
+Expected: PASS.
+
+- [ ] **Step 4: Ground-width soft edge**
+
+Replace `src/map/fogStyle.ts` with:
+
+```ts
+import type { FillLayerSpecification, LineLayerSpecification } from '@maplibre/maplibre-react-native';
+import { BANGKOK } from '../config';
+
+const FOG_COLOR = '#10131c';
+
+export const FOG_FILL_PAINT: FillLayerSpecification['paint'] = {
+  'fill-color': FOG_COLOR,
+  'fill-opacity': 0.8,
+};
+
+// Web Mercator metres per pixel at zoom 0, at Bangkok's latitude (M1 is tuned for Bangkok);
+// it halves with every zoom level.
+const M_PER_PX_Z0 = 156_543 * Math.cos((BANGKOK.lat * Math.PI) / 180);
+
+type LineWidth = NonNullable<LineLayerSpecification['paint']>['line-width'];
+
+/** A width that stays `metres` wide on the ground at every zoom (doubles per zoom level). */
+function groundWidth(metres: number): LineWidth {
+  const px0 = metres / M_PER_PX_Z0;
+  return ['interpolate', ['exponential', 2], ['zoom'], 0, px0, 22, px0 * 2 ** 22];
+}
+
+/** A blurred line along every fog edge, for a soft boundary, `metres` wide on the ground. */
+function edgePaint(metres: number): LineLayerSpecification['paint'] {
+  return {
+    'line-color': FOG_COLOR,
+    'line-opacity': 0.5,
+    'line-width': groundWidth(metres),
+    'line-blur': groundWidth(metres * 0.85),
+  };
+}
+
+/** ~14 px at zoom 15; under 2 px when zoomed out, so it never covers a corridor. */
+export const FINE_EDGE_PAINT = edgePaint(60);
+export const COARSE_EDGE_PAINT = edgePaint(400);
+```
+
+If TypeScript rejects the expression literal for `LineWidth`, check the installed `ExpressionSpecification` / `DataDrivenPropertyValueSpecification` types (from `@maplibre/maplibre-gl-style-spec`, re-exported or not) and type it from there; do not use `any`.
+
+- [ ] **Step 5: Hook and map screen**
+
+In `src/map/useFog.ts`:
+- `FogState` gains `coarseFog: Feature<MultiPolygon>;` after `fog`;
+- `EMPTY` becomes `{ fog: buildFog([]), coarseFog: buildFog([]), cellCount: 0, areaKm2: 0, bounds: null }`;
+- the `setState` call becomes:
+
+```ts
+          setState({
+            fog: update.fog,
+            coarseFog: update.coarseFog,
+            cellCount: update.cellCount,
+            areaKm2: update.areaKm2,
+            bounds: update.bounds,
+          });
+```
+
+In `src/screens/MapScreen.tsx`:
+- imports: `import { BANGKOK, DEFAULT_ZOOM, FINE_FOG_MIN_ZOOM, MAP_STYLE_URL } from '../config';` and `import { COARSE_EDGE_PAINT, FINE_EDGE_PAINT, FOG_FILL_PAINT } from '../map/fogStyle';`
+- `const { fog, coarseFog, cellCount, areaKm2, bounds } = useFog();`
+- replace the single `GeoJSONSource` with:
+
+```tsx
+        {/* Zoomed out: fog from ~1 km parent hexagons, so explored areas read as places, not lines. */}
+        <GeoJSONSource id="fog-coarse" data={coarseFog}>
+          <Layer id="fog-coarse-fill" type="fill" maxzoom={FINE_FOG_MIN_ZOOM} paint={FOG_FILL_PAINT} />
+          <Layer id="fog-coarse-edge" type="line" maxzoom={FINE_FOG_MIN_ZOOM} paint={COARSE_EDGE_PAINT} />
+        </GeoJSONSource>
+        <GeoJSONSource id="fog" data={fog}>
+          <Layer id="fog-fill" type="fill" minzoom={FINE_FOG_MIN_ZOOM} paint={FOG_FILL_PAINT} />
+          <Layer id="fog-edge" type="line" minzoom={FINE_FOG_MIN_ZOOM} paint={FINE_EDGE_PAINT} />
+        </GeoJSONSource>
+```
+
+Run: `rtk proxy npx jest && npm run typecheck`
+Expected: all suites pass, typecheck clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src
+git commit -m "feat(fog): two-ring reveal, coarse fog when zoomed out, ground-width soft edge"
+```
+
+- [ ] **Step 7: Device check (controller and user)**
+
+JS-only change: a Release rebuild is needed to see it in Release (`npx expo run:ios --device 00008110-000A41CA3A39401E --configuration Release --no-bundler`). On the phone: Reset all data, Import GPX (the 50 km route) → corridor ~650 m wide; zoom out past 12 → ~1 km hexagons, no dark edge over corridors; then Stress fill 50,000 → note the first-load time; then import the second route (`fogmap-test-10km-b.gpx`) → note the small-update time at ~50k. Record in the spec under "Plan 2 device results".
