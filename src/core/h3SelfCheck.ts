@@ -13,7 +13,7 @@ import { H3_RES } from './constants';
 
 export type CheckResult = { name: string; ok: boolean; detail: string };
 
-const PARENT_RES = 8; // the coarse fog resolution
+const PARENT_RES = 8; // the coarse fog resolution (COARSE_FOG_RES in src/config.ts; core cannot import config)
 const BANGKOK = { lat: 13.7563, lng: 100.5018 };
 
 function assert(condition: boolean, message: string): void {
@@ -48,7 +48,9 @@ export function runH3SelfCheck(): CheckResult[] {
     ['cellToParent', () => {
       const parent = cellToParent(origin, PARENT_RES);
       assert(getResolution(parent) === PARENT_RES, `parent resolution ${getResolution(parent)}`);
-      assert(cellToParent(origin, PARENT_RES) === parent, 'parent not stable');
+      // Every neighbour's parent is the same parent cell or one next to it.
+      const near = new Set(gridDisk(parent, 1));
+      assert(gridDisk(origin, 1).every((c) => near.has(cellToParent(c, PARENT_RES))), 'neighbour parent too far');
       return `res ${PARENT_RES} parent ${parent}`;
     }],
     ['cellArea', () => {
