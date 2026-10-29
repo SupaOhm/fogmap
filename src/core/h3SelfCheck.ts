@@ -1,8 +1,10 @@
 import {
   UNITS,
   cellArea,
-  cellsToMultiPolygon,
+  cellToLatLng,
+  cellToParent,
   gridDisk,
+  getResolution,
   gridPathCells,
   isValidCell,
   latLngToCell,
@@ -11,13 +13,14 @@ import { H3_RES } from './constants';
 
 export type CheckResult = { name: string; ok: boolean; detail: string };
 
+const PARENT_RES = 8; // the coarse fog resolution
 const BANGKOK = { lat: 13.7563, lng: 100.5018 };
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-/** Exercises every h3-js function the app uses; safe to run on device. */
+/** Exercises the h3-js functions the app uses (cell, grid, centre and parent lookups); safe to run on device. */
 export function runH3SelfCheck(): CheckResult[] {
   const origin = latLngToCell(BANGKOK.lat, BANGKOK.lng, H3_RES);
   const checks: Array<[string, () => string]> = [
@@ -36,13 +39,17 @@ export function runH3SelfCheck(): CheckResult[] {
       assert(path.length > 2, `path too short: ${path.length}`);
       return `${path.length} cells over ~1 km`;
     }],
-    ['cellsToMultiPolygon', () => {
-      const cells = gridDisk(origin, 50);
-      const t0 = Date.now();
-      const polygons = cellsToMultiPolygon(cells, true);
-      const ms = Date.now() - t0;
-      assert(polygons.length === 1, `expected 1 polygon, got ${polygons.length}`);
-      return `${cells.length} cells -> ${polygons.length} polygon in ${ms} ms`;
+    ['cellToLatLng', () => {
+      const [lat, lng] = cellToLatLng(origin);
+      const metres = Math.hypot((lat - BANGKOK.lat) * 111_000, (lng - BANGKOK.lng) * 111_000 * Math.cos((BANGKOK.lat * Math.PI) / 180));
+      assert(metres < 100, `centre ${metres.toFixed(0)} m from the input point`);
+      return `centre ${metres.toFixed(0)} m from the input point`;
+    }],
+    ['cellToParent', () => {
+      const parent = cellToParent(origin, PARENT_RES);
+      assert(getResolution(parent) === PARENT_RES, `parent resolution ${getResolution(parent)}`);
+      assert(cellToParent(origin, PARENT_RES) === parent, 'parent not stable');
+      return `res ${PARENT_RES} parent ${parent}`;
     }],
     ['cellArea', () => {
       const km2 = cellArea(origin, UNITS.km2);

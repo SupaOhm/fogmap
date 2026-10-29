@@ -1,5 +1,5 @@
 import type { Fix } from '../core/types';
-import { cellCount } from './cells';
+import { cellCount, cellsAddedSince } from './cells';
 import { importFixes, resetAllData, stressFill } from './devData';
 import { onCellsChanged } from './events';
 import { migrate } from './schema';
@@ -81,4 +81,18 @@ test('resetAllData empties every table and notifies a reset', async () => {
   off();
   expect([await count(db, 'cells'), await count(db, 'track_log'), await count(db, 'settings')]).toEqual([0, 0, 0]);
   expect(heard).toEqual(['reset']);
+});
+
+test('after a reset, rowids restart, so an old cursor would miss new cells', async () => {
+  const db = await freshDb();
+  await stressFill(db, 20, 0, BANGKOK);
+  const before = await cellsAddedSince(db, 0);
+  expect(before.ids).toHaveLength(20);
+  await resetAllData(db);
+  await stressFill(db, 3, 1, { lat: BANGKOK.lat + 1, lng: BANGKOK.lng });
+  const fresh = await cellsAddedSince(db, 0);
+  expect(fresh.ids).toHaveLength(3);
+  expect(fresh.lastRowid).toBeLessThan(before.lastRowid);
+  // Why listeners must restart from rowid 0 on 'reset'.
+  expect((await cellsAddedSince(db, before.lastRowid)).ids).toEqual([]);
 });
