@@ -2,26 +2,28 @@ import type { HeatmapLayerSpecification } from '@maplibre/maplibre-react-native'
 import { BANGKOK } from '../config';
 
 // Web Mercator metres per pixel at zoom 0, at Bangkok's latitude (M1 is tuned for Bangkok);
-// it halves with every zoom level.
-const M_PER_PX_Z0 = 156_543 * Math.cos((BANGKOK.lat * Math.PI) / 180);
+// it halves with every zoom level. MapLibre's zoom 0 is one 512-px tile (not 256), hence 78_271.517.
+const M_PER_PX_Z0 = 78_271.517 * Math.cos((BANGKOK.lat * Math.PI) / 180);
 
 type HeatmapPaint = NonNullable<HeatmapLayerSpecification['paint']>;
 
 // MapLibre's heatmap kernel is w * intensity * GAUSS_COEF * exp(-4.5 (r/R)^2): a Gaussian with
 // sigma = R / 3, whose integral is GAUSS_COEF * 2 pi sigma^2 (GAUSS_COEF = 1 / sqrt(2 pi)).
 const GAUSS_COEF = 0.3989422804014327;
-// Blur wider than the cell spacing hides the hexagon grid; ~1.2 spacings leaves no visible ripple.
-const SIGMA_PER_SPACING = 1.2;
-// Tuned on the iPhone: at the theoretical intensity, fully revealed areas stayed slightly tinted.
-const INTENSITY_BOOST = 2.5;
+// Blur sigma in cell spacings: 0.6 (fine radius 3 sigma ~ 259 m, coarse ~ 1.8 km) is wide enough to
+// hide the hexagon grid.
+const SIGMA_PER_SPACING = 0.6;
+// The value at which revealed areas look clear on the iPhone. With a boost of 1 a fully revealed
+// area would sit at density 1; at 0.625 it sits at ~0.625.
+const INTENSITY_BOOST = 0.625;
 
 /**
  * Fog as a heatmap of revealed cell centres, the way games do fog of war: the
  * summed kernels are a blurred reveal mask, and the colour ramp thresholds it.
- * Intensity is set so a fully revealed area has density 1; a straight edge of
- * revealed cells then sits at 0.5, so the ramp (fog below 0.2, clear from 0.5)
- * puts the soft rim just outside the real boundary. Sizes stay constant on the
- * ground at every zoom.
+ * A fully revealed area sits at density ~0.625 and a straight edge of revealed
+ * cells at ~0.31. The ramp is fog below 0.2 and clear from 0.5, so the soft rim
+ * reaches a little into the revealed cells. Sizes stay constant on the ground
+ * at every zoom.
  */
 function fogPaint(cellAreaM2: number): HeatmapPaint {
   const spacing = Math.sqrt((2 * cellAreaM2) / Math.sqrt(3)); // hexagon centre-to-centre
