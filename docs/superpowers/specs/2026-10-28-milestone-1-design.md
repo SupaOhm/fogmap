@@ -136,6 +136,16 @@ If the on-device stress test at 50,000 cells is not acceptable, switch `buildFog
 
 **Decision (2026-10-29, user):** keep one `FogBuilder` alive and add only cells stored since the last refresh (found by SQLite rowid); split the first load into slices with a pause between them so the UI keeps responding. 50k-scale speed is deferred to a later milestone (chunking or a native builder). **Known limit:** each update still runs `toFeature` over every outline, so update time grows with total cells (estimated ~0.5 s at 10k and a few seconds at 50k on the iPhone 14). Map panning is native and stays smooth; JS buttons may stutter briefly during an update. The Debug tab shows each refresh's time so this can be watched in the field.
 
+### Plan 2 device results (2026-10-29, Release, iPhone 14)
+
+- **GPX corridor** (synthetic 50 km, 428 points): 428/428 accepted, 1,171 cells, 20.92 km², fog refresh **188 ms**. No gaps along the corridor. Fog winding correct (dark everywhere except revealed).
+- **50,000 cells:** first load **7,888 ms** (+49,687 → 50,858 cells; Debug build: 17,259 ms). Panning stays smooth, with a short (<1 s) hitch while the fog loads.
+- **Small update at 50k:** not measured: re-importing the same route adds no new cells, so no refresh runs (correct behaviour). Measure with a different route (`node scripts/make-test-gpx.mjs out.gpx 10 99`).
+- **Soft edge:** user keeps it. Zoomed out, the fixed 14 px blurred line was wider than the corridors and painted them darker than the fog.
+- **Resolution 10 look (user):** the revealed area feels too narrow ("road wide"), and zoomed out it reads as lines rather than places visited.
+
+**Decision (2026-10-29, user): "both".** Reveal two rings of neighbours instead of one (`REVEAL_RADIUS = 2`, corridor ~650 m instead of ~400 m; ~1.7× more cells per km, so the 50k scale arrives sooner). Below zoom 12 the map draws the fog from the res-8 parents of the stored cells (~1 km hexagons), so explored neighbourhoods clear as areas; from zoom 12 it draws the stored res-10 cells. Storage is unchanged (res-10 cells only). The soft edge keeps a constant width on the ground instead of a constant pixel width. Plan 2, Task 9.
+
 ## Verification
 
 | Acceptance criterion | How it is checked |
@@ -165,5 +175,5 @@ If the on-device stress test at 50,000 cells is not acceptable, switch `buildFog
 ## Open questions (report back, don't decide alone)
 
 - Battery use per mode after a real day.
-- Whether resolution 10 looks right, or 9 or 11.
+- Whether resolution 10 looks right, or 9 or 11. (2026-10-29: user found res 10 with one ring too narrow; Task 9 widens the reveal and adds coarse fog when zoomed out. Re-check in the field.)
 - Any iOS behaviour that makes reliable background reveal impossible without a different approach.
