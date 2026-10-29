@@ -33,3 +33,21 @@ test('listeners get the kind of change, added by default', () => {
   off();
   expect(heard).toEqual(['added', 'reset']);
 });
+
+test('a throwing listener does not stop the others; the first error is rethrown', () => {
+  const heard: string[] = [];
+  const first = new Error('first');
+  const offA = onCellsChanged(() => {
+    throw first;
+  });
+  const offB = onCellsChanged(() => {
+    heard.push('b');
+    throw new Error('second');
+  });
+  const offC = onCellsChanged(() => heard.push('c'));
+  expect(() => emitCellsChanged()).toThrow(first);
+  offA();
+  offB();
+  offC();
+  expect(heard).toEqual(['b', 'c']);
+});

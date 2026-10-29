@@ -10,7 +10,7 @@ import { cellCount } from '../db/cells';
 import { importFixes, resetAllData, stressFill } from '../db/devData';
 import { onCellsChanged } from '../db/events';
 import { getDb } from '../db/open';
-import { fogStats } from '../map/fogStats';
+import { fogStats, onFogStats } from '../map/fogStats';
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -29,6 +29,7 @@ export function DebugScreen() {
   }, []);
   useFocusEffect(refresh);
   useEffect(() => onCellsChanged(refresh), [refresh]);
+  useEffect(() => onFogStats(() => setFog(fogStats())), []);
 
   const run = async (label: string, action: () => Promise<string>) => {
     setBusy(true);

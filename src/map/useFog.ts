@@ -55,7 +55,8 @@ export function useFog(): FogState {
       recordFogError,
     );
 
-    throttle.request();
+    // iOS can launch the app in the background for location; the 'active' listener covers later.
+    if (AppState.currentState === 'active') throttle.request();
     const offCells = onCellsChanged((change) => {
       if (change === 'reset') source.markReset();
       if (AppState.currentState === 'active') throttle.request();
