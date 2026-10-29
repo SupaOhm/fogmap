@@ -13,16 +13,17 @@ test('reads track points with times, in either attribute order', () => {
   ]);
 });
 
-test('synthesizes walking-pace times when any point lacks a time', () => {
+test('synthesizes walking-pace times ending at endMs when any point lacks a time', () => {
   const xml = `<gpx><trk><trkseg>
     <trkpt lat="13.7563" lon="100.5018"><time>2026-10-28T01:00:00Z</time></trkpt>
     <trkpt lat="13.7563" lon="100.5118"/>
   </trkseg></trk></gpx>`;
-  const fixes = parseGpx(xml, 1_000);
-  expect(fixes[0]!.ts).toBe(1_000);
+  const end = 1_000_000_000;
+  const fixes = parseGpx(xml, end);
+  expect(fixes[1]!.ts).toBe(end);
   // ~1081 m at 5 km/h is ~778 s
-  expect(fixes[1]!.ts - 1_000).toBeGreaterThan(770_000);
-  expect(fixes[1]!.ts - 1_000).toBeLessThan(790_000);
+  expect(end - fixes[0]!.ts).toBeGreaterThan(770_000);
+  expect(end - fixes[0]!.ts).toBeLessThan(790_000);
 });
 
 test('reads route points and skips invalid coordinates', () => {

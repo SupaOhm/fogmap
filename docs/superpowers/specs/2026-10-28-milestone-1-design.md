@@ -36,7 +36,7 @@ Pure TypeScript, no React or Expo imports, fully unit-tested with Jest.
 | `pipeline.ts` | `processFixes(fixes, lastPoint)` returns `{ cells: Map<h3, RevealedCell>, logRows, nextLastPoint }`; `firstTs`/`lastTs` are the earliest/latest fix times that revealed the cell, so the database sets `first_seen`/`last_seen` from fix time, not wall-clock time |
 | `stats.ts` | Area as the sum of `cellArea` (km²); today / this week / all-time windows using local midnight and a Monday week start; battery %/hour per tracking mode, ignoring intervals where the level rose (charging) |
 | `fog.ts` | `buildFog(cells)` returns GeoJSON: a world-covering polygon with the revealed area (`cellsToMultiPolygon`) as holes |
-| `gpx.ts` | Parse a GPX string into `Fix[]` with accuracy 5 m and `speed: null`; when timestamps are missing, synthesize them at walking pace (5 km/h) |
+| `gpx.ts` | Parse a GPX string into `Fix[]` with accuracy 5 m and `speed: null`; when timestamps are missing, synthesize them at walking pace (5 km/h), ending at the given end time (the import time) |
 | `stress.ts` | Generate N cells along a random walk, for the rendering benchmark |
 
 **Fix checks, in order** (amended after the Plan 1 final review, 2026-10-28):

@@ -13,9 +13,10 @@ function numericAttr(attrs: string, name: string): number {
 
 /**
  * Dev-only GPX reader. Uses <time> when every point has one; otherwise spaces
- * points at walking pace from startMs so gap filling behaves like a walk.
+ * points at walking pace so the route ends at endMs (the import time) and gap
+ * filling behaves like a walk.
  */
-export function parseGpx(xml: string, startMs: number): Fix[] {
+export function parseGpx(xml: string, endMs: number): Fix[] {
   const points: Array<{ lat: number; lng: number; time: number }> = [];
   for (const m of xml.matchAll(POINT_RE)) {
     const attrs = m[2] ?? '';
@@ -29,16 +30,20 @@ export function parseGpx(xml: string, startMs: number): Fix[] {
   }
 
   const hasTimes = points.length > 0 && points.every((p) => Number.isFinite(p.time));
-  let synthetic = startMs;
-  return points.map((p, i) => {
+  const offsets: number[] = [];
+  let elapsed = 0;
+  points.forEach((p, i) => {
     const q = points[i - 1];
-    if (!hasTimes && q) synthetic += (distanceM(q.lat, q.lng, p.lat, p.lng) / WALK_MPS) * 1000;
-    return {
-      ts: hasTimes ? p.time : Math.round(synthetic),
-      lat: p.lat,
-      lng: p.lng,
-      accuracy: GPX_ACCURACY_M,
-      speed: null,
-    };
+    if (q) elapsed += (distanceM(q.lat, q.lng, p.lat, p.lng) / WALK_MPS) * 1000;
+    offsets.push(elapsed);
   });
+  const startMs = endMs - elapsed;
+
+  return points.map((p, i) => ({
+    ts: hasTimes ? p.time : Math.round(startMs + offsets[i]!),
+    lat: p.lat,
+    lng: p.lng,
+    accuracy: GPX_ACCURACY_M,
+    speed: null,
+  }));
 }
