@@ -132,6 +132,8 @@ If the on-device stress test at 50,000 cells is not acceptable, switch `buildFog
 
 **Release build (2026-10-29, iPhone 14, Hermes):** buildFog 10k = 2,055 ms, 25k = 5,206 ms, 50k = **10,324 ms** (156 polygons, 62,421 vertices); `cellsToMultiPolygon` on 7,651 cells = 1,377 ms. Cost is linear at ~0.2 ms per cell, about 40× slower than Node. **The 1 s gate fails by ~10×**, and even a typical few thousand cells would block the JS thread for over half a second per rebuild. Next step is the user's decision (Plan 2, Task 1 gate).
 
+**Edge-cancellation builder (Task 1b, 2026-10-29, iPhone 14, Release):** buildFog 10k = 1,335 ms, 25k = 3,429 ms, 50k = **7,153 ms** (same 156 polygons, 62,421 vertices). About 30% faster, ~0.14 ms per cell, still ~7× over the gate. In Node at 50k, `add` takes ~236 ms and `toFeature` ~155 ms (~70 ms warm), so incremental adds alone would remove roughly 60% of the per-update cost; `toFeature` stays linear in total cells.
+
 ## Verification
 
 | Acceptance criterion | How it is checked |
