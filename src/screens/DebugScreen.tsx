@@ -47,7 +47,18 @@ export function DebugScreen() {
       const picked = await getDocumentAsync({ type: '*/*', copyToCacheDirectory: true });
       const asset = picked.canceled ? undefined : picked.assets[0];
       if (!asset) return 'Import cancelled';
-      const fixes = parseGpx(await new File(asset.uri).text(), Date.now());
+      const file = new File(asset.uri);
+      let fixes;
+      try {
+        fixes = parseGpx(await file.text(), Date.now());
+      } finally {
+        // The picker copied the raw GPX into the app cache; no raw coordinates may persist.
+        try {
+          if (file.exists) file.delete();
+        } catch {
+          // Already gone or not deletable; nothing more to clean up.
+        }
+      }
       const r = await importFixes(await getDb(), fixes);
       return `${asset.name}: ${r.accepted}/${r.fixes} fixes accepted, ${r.cells.toLocaleString()} cells`;
     });
