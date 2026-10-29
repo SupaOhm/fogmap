@@ -917,13 +917,14 @@ import type { Db } from './types';
  */
 export const MIGRATIONS: readonly string[] = [
   `
+  -- cells keeps its rowid: the map reads newly stored cells by rowid (cellsAddedSince).
   CREATE TABLE cells (
     h3 TEXT PRIMARY KEY NOT NULL,
     first_seen INTEGER NOT NULL,
     last_seen INTEGER NOT NULL,
     visit_count INTEGER NOT NULL,
     mode TEXT NOT NULL
-  ) WITHOUT ROWID;
+  );
   CREATE INDEX cells_first_seen ON cells (first_seen);
   CREATE TABLE track_log (
     ts INTEGER NOT NULL,

@@ -29,6 +29,14 @@ test('a fresh database gets every table and the latest version', async () => {
   expect(await columns(db, 'settings')).toEqual(['key', 'value']);
 });
 
+test('cells keep a rowid, which marks the order cells were first stored', async () => {
+  const db = openNodeDb();
+  await migrate(db);
+  await db.runAsync("INSERT INTO cells VALUES ('b', 1, 1, 1, 'walk'), ('a', 1, 1, 1, 'walk')", []);
+  const rows = await db.getAllAsync<{ h3: string }>('SELECT h3 FROM cells ORDER BY rowid', []);
+  expect(rows.map((r) => r.h3)).toEqual(['b', 'a']);
+});
+
 test('migrating twice changes nothing', async () => {
   const db = openNodeDb();
   await migrate(db);
