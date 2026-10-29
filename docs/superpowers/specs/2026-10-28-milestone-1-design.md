@@ -1,6 +1,7 @@
 # Milestone 1 design: solo fog map
 
 Status: approved in brainstorming on 2026-10-28.
+Update: fog is now a heatmap of cell centres, not polygons; `buildFog` and the polygon fog described below are historical, see [the heatmap spec](2026-10-29-heatmap-fog-design.md).
 Requirements: [docs/milestone-1.md](../../milestone-1.md). This document records how they will be built and every decision that refines or changes them.
 
 ## Changes to the milestone spec
@@ -106,7 +107,7 @@ Bottom tabs with expo-router: **Map**, **Stats**, **Debug** (Debug only when the
 
 **Map**
 - MapLibre with an OpenFreeMap style, picked during scaffolding from the styles currently published; the style URL is a constant, and MapTiler is the fallback.
-- Fog: `buildFog` output in a ShapeSource drawn by a dark FillLayer (~0.8 opacity), plus a blurred LineLayer on the same shape for a soft edge, dropped if it looks wrong.
+- Fog: `buildFog` output in a ShapeSource drawn by a dark FillLayer (~0.8 opacity), plus a blurred LineLayer on the same shape for a soft edge, dropped if it looks wrong. (Superseded: fog is now a heatmap, see the heatmap spec.)
 - Refresh on the tracking event and when the app returns to the foreground, debounced so `buildFog` runs at most once every 2 s.
 - Follow-me button using MapLibre's user location and camera follow (foreground only, separate from tracking).
 - Tracking on/off toggle, km² chip, banner when "Always" is missing.

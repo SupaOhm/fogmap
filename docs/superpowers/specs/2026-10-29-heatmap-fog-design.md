@@ -29,12 +29,12 @@ MapLibre's heatmap layer is the same pipeline on the GPU: every point adds a Gau
 - No `FogBuilder` at runtime.
 
 **Rendering (src/map/fogStyle.ts, src/screens/MapScreen.tsx):** two heatmap layers replace the four fill and line layers: coarse points below zoom 12 (`FINE_FOG_MIN_ZOOM`), fine points from zoom 12.
-- `heatmap-radius`: constant on the ground via exponential zoom interpolation (fine 320 m, coarse 1,800 m; Bangkok latitude, as for Task 9's edge).
+- `heatmap-radius`: constant on the ground via exponential zoom interpolation (sigma 0.6 cell spacings: fine ≈ 259 m, coarse ≈ 1.8 km; Bangkok latitude, as for Task 9's edge). Correction: MapLibre's zoom 0 is one 512-px tile, so the first version's "320 m" was really 160 m; the code now uses the 512-px scale.
 - `heatmap-intensity` 2, `heatmap-weight` 1.
 - `heatmap-color`: fog `rgba(16,19,28,0.82)` up to density 0.05, `0.4` alpha at 0.15, clear at 0.25.
 - The blurred line edge goes: the heatmap rim is the soft edge.
 
-**Removed (no longer used):** `FogBuilder`, `buildFog`, `WORLD_RING`, the polygon fog tests, `src/core/fogBenchmark.ts`, and the Debug tab's "Benchmark 10k / 25k / 50k" button. Kept in `src/core/fog.ts`: `Bounds`, `cellsBounds`, `parentCells`. The Debug tab keeps "Last refresh", which now measures the heatmap path. The old code stays in git history.
+**Removed (no longer used):** `FogBuilder`, `buildFog`, `WORLD_RING`, the polygon fog tests, `src/core/fogBenchmark.ts`, and the Debug tab's "Benchmark 10k / 25k / 50k" button. Kept in `src/core/fog.ts`: `Bounds`, `pointsBounds`, `cellCentre`, `parentCells`. The Debug tab keeps "Last refresh", which now measures the heatmap path. The old code stays in git history.
 
 ## Device results (2026-10-29, iPhone 14)
 
