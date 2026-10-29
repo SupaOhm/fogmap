@@ -2879,3 +2879,488 @@ git commit -m "feat(fog): two-ring reveal, coarse fog when zoomed out, ground-wi
 - [ ] **Step 7: Device check (controller and user)**
 
 JS-only change: a Release rebuild is needed to see it in Release (`npx expo run:ios --device 00008110-000A41CA3A39401E --configuration Release --no-bundler`). On the phone: Reset all data, Import GPX (the 50 km route) → corridor ~650 m wide; zoom out past 12 → ~1 km hexagons, no dark edge over corridors; then Stress fill 50,000 → note the first-load time; then import the second route (`fogmap-test-10km-b.gpx`) → note the small-update time at ~50k. Record in the spec under "Plan 2 device results".
+
+---
+
+### Task 10: Heatmap fog (added after the fog-look decision)
+
+**Why:** The user wants fog that looks like fog (style D: today's dark colour, smooth feathered edges, no visible hexagons). Design and spike results: [docs/superpowers/specs/2026-10-29-heatmap-fog-design.md](../specs/2026-10-29-heatmap-fog-design.md). The spike (branch `spike/heatmap-fog`) showed MapLibre iOS fogs areas with no points, and a threshold ramp gives continuous soft clearings; 50k cells first load = 3,921 ms in Debug (polygon fog: 17,259 ms).
+
+**Files:**
+- Replace: `src/core/fog.ts`, `src/core/fog.test.ts`, `src/map/fogSource.ts`, `src/map/fogSource.test.ts`, `src/map/fogStyle.ts`
+- Modify: `src/map/useFog.ts`, `src/screens/MapScreen.tsx`, `src/screens/DebugScreen.tsx`
+- Delete: `src/core/fogBenchmark.ts`, `src/core/fogBenchmark.test.ts`
+
+**Interfaces:**
+- Consumes: `COARSE_FOG_RES`, `FINE_FOG_MIN_ZOOM`, `BANGKOK` (`src/config.ts`), `areaKm2` (`src/core/stats.ts`), `stressCells` (tests), MapLibre 11 `Layer type="heatmap"` with style-spec `paint`, `minzoom`, `maxzoom`; `HeatmapLayerSpecification` is exported by `@maplibre/maplibre-react-native`.
+- Produces:
+  - `src/core/fog.ts`: `Bounds`, `LngLat`, `cellCentre(cell): LngLat`, `pointsBounds(points: Iterable<LngLat>): Bounds | null`, `parentCells(cells, res): string[]`. `FogBuilder`, `buildFog`, `WORLD_RING`, `cellsBounds` are removed.
+  - `src/map/fogSource.ts`: `FogPoints = FeatureCollection<Point>`, `NO_FOG_POINTS`, `FogUpdate` with `fog: FogPoints` and `coarseFog: FogPoints` (other fields unchanged), `FogSource` (constructor and methods unchanged).
+  - `src/map/fogStyle.ts`: `FINE_FOG_PAINT`, `COARSE_FOG_PAINT` (heatmap paints). `FOG_FILL_PAINT`, `FINE_EDGE_PAINT`, `COARSE_EDGE_PAINT` are removed.
+
+- [ ] **Step 1: Core helpers (tests first)**
+
+Replace `src/core/fog.test.ts` with:
+
+```ts
+import { cellToLatLng, cellToParent, getResolution, gridDisk, latLngToCell } from 'h3-js';
+import { H3_RES } from './constants';
+import { cellCentre, parentCells, pointsBounds } from './fog';
+
+const centre = latLngToCell(13.7563, 100.5018, H3_RES);
+
+describe('cellCentre', () => {
+  test('is the cell centre in GeoJSON [lng, lat] order', () => {
+    const [lat, lng] = cellToLatLng(centre);
+    expect(cellCentre(centre)).toEqual([lng, lat]);
+  });
+});
+
+describe('pointsBounds', () => {
+  test('is null without points', () => {
+    expect(pointsBounds([])).toBeNull();
+  });
+  test('is the point itself for one point, as [west, south, east, north]', () => {
+    expect(pointsBounds([[100.5, 13.7]])).toEqual([100.5, 13.7, 100.5, 13.7]);
+  });
+  test('covers every point', () => {
+    expect(
+      pointsBounds([
+        [100.5, 13.9],
+        [100.7, 13.7],
+        [100.6, 13.8],
+      ]),
+    ).toEqual([100.5, 13.7, 100.7, 13.9]);
+  });
+});
+
+describe('parentCells', () => {
+  test('maps cells to their unique parents at the given resolution', () => {
+    const disk = gridDisk(centre, 2);
+    const parents = parentCells(disk, 8);
+    expect(new Set(parents)).toEqual(new Set(disk.map((c) => cellToParent(c, 8))));
+    expect(parents.length).toBe(new Set(parents).size);
+    expect(parents.every((p) => getResolution(p) === 8)).toBe(true);
+  });
+  test('is empty without cells', () => {
+    expect(parentCells([], 8)).toEqual([]);
+  });
+});
+```
+
+Run: `rtk proxy npx jest src/core/fog.test.ts`
+Expected: FAIL (`cellCentre` and `pointsBounds` are not exported).
+
+Replace `src/core/fog.ts` with:
+
+```ts
+import { cellToLatLng, cellToParent } from 'h3-js';
+
+export type Bounds = [west: number, south: number, east: number, north: number];
+/** A position in GeoJSON order. */
+export type LngLat = [lng: number, lat: number];
+
+/** A cell's centre. The fog is a heatmap of revealed cell centres; hexagons are never drawn. */
+export function cellCentre(cell: string): LngLat {
+  const [lat, lng] = cellToLatLng(cell);
+  return [lng, lat];
+}
+
+/** Bounding box of the points, or null without points. Ignores the antimeridian. */
+export function pointsBounds(points: Iterable<LngLat>): Bounds | null {
+  let west = Infinity;
+  let south = Infinity;
+  let east = -Infinity;
+  let north = -Infinity;
+  for (const [lng, lat] of points) {
+    west = Math.min(west, lng);
+    east = Math.max(east, lng);
+    south = Math.min(south, lat);
+    north = Math.max(north, lat);
+  }
+  return west === Infinity ? null : [west, south, east, north];
+}
+
+/** The unique parents of cells at a coarser resolution, in first-seen order (coarse fog when zoomed out). */
+export function parentCells(cells: Iterable<string>, res: number): string[] {
+  const parents = new Set<string>();
+  for (const c of cells) parents.add(cellToParent(c, res));
+  return [...parents];
+}
+```
+
+Delete `src/core/fogBenchmark.ts` and `src/core/fogBenchmark.test.ts` (`git rm`).
+
+Run: `rtk proxy npx jest src/core`
+Expected: PASS. (The map and Debug files still import removed names until Steps 2–4; typecheck is run at the end.)
+
+- [ ] **Step 2: `FogSource` emits points (tests first)**
+
+Replace `src/map/fogSource.test.ts` with:
+
+```ts
+import { COARSE_FOG_RES } from '../config';
+import { cellCentre, parentCells, pointsBounds } from '../core/fog';
+import { areaKm2 } from '../core/stats';
+import { stressCells } from '../core/stress';
+import { type FogPoints, FogSource, type NewCells } from './fogSource';
+
+const BANGKOK = { lat: 13.7563, lng: 100.5018 };
+const CELLS = stressCells(300, 1, BANGKOK);
+
+const coords = (f: FogPoints) => f.features.map((p) => p.geometry.coordinates);
+const centres = (cells: string[]) => cells.map(cellCentre);
+const coarseCentres = (cells: string[]) => parentCells(cells, COARSE_FOG_RES).map(cellCentre);
+
+/** A fake cells table: row i has rowid i + 1, and rowids restart from 1 after clear(), like SQLite. */
+function table(initial: string[] = []) {
+  let rows = [...initial];
+  return {
+    insert(ids: string[]) {
+      rows.push(...ids);
+    },
+    clear() {
+      rows = [];
+    },
+    readSince: async (after: number): Promise<NewCells> => {
+      const ids = rows.slice(after);
+      return { ids, lastRowid: after + ids.length };
+    },
+  };
+}
+
+const noPause = async () => {};
+const now = () => 0;
+
+test('the first refresh adds a point per stored cell and per coarse parent', async () => {
+  const source = new FogSource(table(CELLS).readSince, noPause, now);
+  const update = (await source.refresh())!;
+  expect(update.cellCount).toBe(300);
+  expect(update.added).toBe(300);
+  expect(update.areaKm2).toBeCloseTo(areaKm2(CELLS), 9);
+  expect(update.bounds).toEqual(pointsBounds(centres(CELLS)));
+  expect(coords(update.fog)).toEqual(centres(CELLS));
+  expect(coords(update.coarseFog)).toEqual(coarseCentres(CELLS));
+  expect(update.coarseFog.features.length).toBeLessThan(300);
+});
+
+test('a refresh with nothing new returns null', async () => {
+  const source = new FogSource(table(CELLS).readSince, noPause, now);
+  await source.refresh();
+  expect(await source.refresh()).toBeNull();
+});
+
+test('later refreshes add only new cells and match a full load', async () => {
+  const t = table(CELLS.slice(0, 200));
+  const source = new FogSource(t.readSince, noPause, now);
+  const first = (await source.refresh())!;
+  t.insert(CELLS.slice(200));
+  const update = (await source.refresh())!;
+  expect(update.added).toBe(100);
+  expect(update.cellCount).toBe(300);
+  expect(update.areaKm2).toBeCloseTo(areaKm2(CELLS), 9);
+  expect(update.bounds).toEqual(pointsBounds(centres(CELLS)));
+  expect(coords(update.fog)).toEqual(centres(CELLS));
+  expect(coords(update.coarseFog)).toEqual(coarseCentres(CELLS));
+  // The earlier result is not mutated, so the map sees a new value.
+  expect(first.fog.features.length).toBe(200);
+});
+
+test('pauses between slices, not before the first one', async () => {
+  let pauses = 0;
+  const source = new FogSource(
+    table(CELLS).readSince,
+    async () => {
+      pauses++;
+    },
+    now,
+    100,
+  );
+  await source.refresh();
+  expect(pauses).toBe(2);
+});
+
+test('ms counts work between pauses, not the pauses', async () => {
+  let clock = 0;
+  const source = new FogSource(
+    table(CELLS).readSince,
+    async () => {
+      clock += 1_000;
+    },
+    () => clock,
+    100,
+  );
+  expect((await source.refresh())!.ms).toBe(0);
+});
+
+test('after markReset the next refresh starts from scratch, though rowids restarted', async () => {
+  const t = table(CELLS);
+  const source = new FogSource(t.readSince, noPause, now);
+  await source.refresh();
+  t.clear();
+  t.insert(CELLS.slice(0, 50));
+  source.markReset();
+  const update = (await source.refresh())!;
+  expect(update.cellCount).toBe(50);
+  expect(update.added).toBe(50);
+  expect(update.areaKm2).toBeCloseTo(areaKm2(CELLS.slice(0, 50)), 9);
+  expect(update.bounds).toEqual(pointsBounds(centres(CELLS.slice(0, 50))));
+  expect(coords(update.fog)).toEqual(centres(CELLS.slice(0, 50)));
+  expect(coords(update.coarseFog)).toEqual(coarseCentres(CELLS.slice(0, 50)));
+});
+
+test('a reset to an empty table leaves no points (all fog)', async () => {
+  const t = table(CELLS);
+  const source = new FogSource(t.readSince, noPause, now);
+  await source.refresh();
+  t.clear();
+  source.markReset();
+  const update = (await source.refresh())!;
+  expect(update).toMatchObject({ cellCount: 0, added: 0, areaKm2: 0, bounds: null });
+  expect(update.fog.features).toEqual([]);
+  expect(update.coarseFog.features).toEqual([]);
+});
+
+test('after a failed refresh the next one starts from scratch', async () => {
+  const t = table(CELLS);
+  const asked: number[] = [];
+  let fail = true;
+  const source = new FogSource(
+    async (after) => {
+      asked.push(after);
+      return t.readSince(after);
+    },
+    async () => {
+      if (fail) throw new Error('interrupted');
+    },
+    now,
+    100,
+  );
+  await expect(source.refresh()).rejects.toThrow('interrupted');
+  fail = false;
+  const update = (await source.refresh())!;
+  expect(asked).toEqual([0, 0]);
+  expect(update.cellCount).toBe(300);
+  expect(update.added).toBe(300);
+  expect(update.areaKm2).toBeCloseTo(areaKm2(CELLS), 9);
+  expect(coords(update.fog)).toEqual(centres(CELLS));
+  expect(coords(update.coarseFog)).toEqual(coarseCentres(CELLS));
+});
+```
+
+Run: `rtk proxy npx jest src/map/fogSource.test.ts`
+Expected: FAIL (`FogPoints` is not exported; `fog` has no `features`).
+
+Replace `src/map/fogSource.ts` with:
+
+```ts
+import type { Feature, FeatureCollection, Point } from 'geojson';
+import { COARSE_FOG_RES } from '../config';
+import { type Bounds, type LngLat, cellCentre, parentCells, pointsBounds } from '../core/fog';
+import { areaKm2 } from '../core/stats';
+
+/** Cells stored after a rowid, as returned by cellsAddedSince. */
+export type NewCells = { ids: string[]; lastRowid: number };
+
+/** Revealed places as points; the map draws them as a heatmap that clears the fog. */
+export type FogPoints = FeatureCollection<Point>;
+
+export const NO_FOG_POINTS: FogPoints = { type: 'FeatureCollection', features: [] };
+
+export type FogUpdate = {
+  /** One point per stored cell, at its centre. */
+  fog: FogPoints;
+  /** One point per res-COARSE_FOG_RES parent of the stored cells, for zoomed-out views. */
+  coarseFog: FogPoints;
+  cellCount: number;
+  areaKm2: number;
+  bounds: Bounds | null;
+  /** Cells added by this refresh. */
+  added: number;
+  /** JS time spent, not counting the pauses between slices. */
+  ms: number;
+};
+
+// Keeps each blocking stretch of the first, large load short.
+const SLICE_CELLS = 2_000;
+
+function point(coordinates: LngLat): Feature<Point> {
+  return { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates } };
+}
+
+function unionBounds(a: Bounds | null, b: Bounds | null): Bounds | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
+}
+
+/**
+ * Keeps the fog's points for the app's lifetime and adds only the cells stored
+ * since the last refresh, in slices with a pause between them. A refresh costs
+ * a few h3 lookups per new cell; the GPU heatmap does the drawing.
+ */
+export class FogSource {
+  private points: Feature<Point>[] = [];
+  private coarsePoints: Feature<Point>[] = [];
+  private readonly coarseSeen = new Set<string>();
+  private lastRowid = 0;
+  private needsReset = false;
+  private area = 0;
+  private bounds: Bounds | null = null;
+
+  constructor(
+    private readonly readSince: (afterRowid: number) => Promise<NewCells>,
+    private readonly pause: () => Promise<void>,
+    private readonly now: () => number,
+    private readonly sliceCells = SLICE_CELLS,
+  ) {}
+
+  /** Stored cells were deleted: the next refresh starts again from rowid 0. */
+  markReset(): void {
+    this.needsReset = true;
+  }
+
+  /** The fog after adding newly stored cells, or null when nothing changed. */
+  async refresh(): Promise<FogUpdate | null> {
+    const reset = this.needsReset;
+    this.needsReset = false;
+    try {
+      const { ids, lastRowid } = await this.readSince(reset ? 0 : this.lastRowid);
+      if (!reset && ids.length === 0) return null;
+      let ms = 0;
+      let start = this.now();
+      if (reset) {
+        this.points = [];
+        this.coarsePoints = [];
+        this.coarseSeen.clear();
+        this.area = 0;
+        this.bounds = null;
+      }
+      for (let i = 0; i < ids.length; i += this.sliceCells) {
+        if (i > 0) {
+          ms += this.now() - start;
+          await this.pause();
+          start = this.now();
+        }
+        const slice = ids.slice(i, i + this.sliceCells);
+        const centres = slice.map(cellCentre);
+        for (const c of centres) this.points.push(point(c));
+        for (const parent of parentCells(slice, COARSE_FOG_RES)) {
+          if (this.coarseSeen.has(parent)) continue;
+          this.coarseSeen.add(parent);
+          this.coarsePoints.push(point(cellCentre(parent)));
+        }
+        this.area += areaKm2(slice);
+        this.bounds = unionBounds(this.bounds, pointsBounds(centres));
+      }
+      // Fresh arrays, so earlier results stay unchanged and the map sees new data.
+      const fog: FogPoints = { type: 'FeatureCollection', features: [...this.points] };
+      const coarseFog: FogPoints = { type: 'FeatureCollection', features: [...this.coarsePoints] };
+      ms += this.now() - start;
+      this.lastRowid = lastRowid;
+      return {
+        fog,
+        coarseFog,
+        cellCount: this.points.length,
+        areaKm2: this.area,
+        bounds: this.bounds,
+        added: ids.length,
+        ms,
+      };
+    } catch (e) {
+      // The points may hold part of a slice: rebuild everything next time.
+      this.needsReset = true;
+      throw e;
+    }
+  }
+}
+```
+
+Run: `rtk proxy npx jest src/map/fogSource.test.ts`
+Expected: PASS (8 tests).
+
+- [ ] **Step 3: Heatmap style, hook and map**
+
+Replace `src/map/fogStyle.ts` with:
+
+```ts
+import type { HeatmapLayerSpecification } from '@maplibre/maplibre-react-native';
+import { BANGKOK } from '../config';
+
+// Web Mercator metres per pixel at zoom 0, at Bangkok's latitude (M1 is tuned for Bangkok);
+// it halves with every zoom level.
+const M_PER_PX_Z0 = 156_543 * Math.cos((BANGKOK.lat * Math.PI) / 180);
+
+type HeatmapPaint = NonNullable<HeatmapLayerSpecification['paint']>;
+
+/**
+ * Fog as a heatmap of revealed cell centres, the way games do fog of war: the
+ * summed kernels are a blurred reveal mask and the colour ramp thresholds it:
+ * full fog below density 0.05, clear above 0.25, a soft rim in between. The
+ * kernel radius stays `radiusMetres` on the ground at every zoom.
+ */
+function fogPaint(radiusMetres: number): HeatmapPaint {
+  const px0 = radiusMetres / M_PER_PX_Z0;
+  return {
+    'heatmap-radius': ['interpolate', ['exponential', 2], ['zoom'], 0, px0, 22, px0 * 2 ** 22],
+    'heatmap-weight': 1,
+    'heatmap-intensity': 2,
+    'heatmap-color': [
+      'interpolate',
+      ['linear'],
+      ['heatmap-density'],
+      0,
+      'rgba(16,19,28,0.82)',
+      0.05,
+      'rgba(16,19,28,0.82)',
+      0.15,
+      'rgba(16,19,28,0.4)',
+      0.25,
+      'rgba(16,19,28,0)',
+    ],
+  };
+}
+
+// Res-10 cell centres are ~145 m apart near Bangkok, res-8 parents ~1 km: the
+// radii are about two spacings so neighbouring kernels merge.
+export const FINE_FOG_PAINT = fogPaint(320);
+export const COARSE_FOG_PAINT = fogPaint(1800);
+```
+
+In `src/map/useFog.ts`:
+- replace `import type { Feature, MultiPolygon } from 'geojson';` with nothing (remove it) and `import { type Bounds, buildFog } from '../core/fog';` with `import type { Bounds } from '../core/fog';`
+- change `import { FogSource } from './fogSource';` to `import { type FogPoints, FogSource, NO_FOG_POINTS } from './fogSource';`
+- in `FogState`, `fog: FogPoints;` and `coarseFog: FogPoints;`
+- `const EMPTY: FogState = { fog: NO_FOG_POINTS, coarseFog: NO_FOG_POINTS, cellCount: 0, areaKm2: 0, bounds: null };`
+
+In `src/screens/MapScreen.tsx`:
+- change the fogStyle import to `import { COARSE_FOG_PAINT, FINE_FOG_PAINT } from '../map/fogStyle';`
+- replace the comment and both `GeoJSONSource` blocks with:
+
+```tsx
+        {/* Fog is a heatmap of revealed cell centres; zoomed out it uses ~1 km parent cells. */}
+        <GeoJSONSource id="fog-coarse" data={coarseFog}>
+          <Layer id="fog-coarse" type="heatmap" maxzoom={FINE_FOG_MIN_ZOOM} paint={COARSE_FOG_PAINT} />
+        </GeoJSONSource>
+        <GeoJSONSource id="fog" data={fog}>
+          <Layer id="fog" type="heatmap" minzoom={FINE_FOG_MIN_ZOOM} paint={FINE_FOG_PAINT} />
+        </GeoJSONSource>
+```
+
+- [ ] **Step 4: Remove the polygon benchmark from the Debug tab**
+
+In `src/screens/DebugScreen.tsx` remove: the `fogBenchmark` import, `BENCHMARK_SIZES`, the `bench` state, the `benchmark` function, and in the Fog section the `Benchmark 10k / 25k / 50k` button and the `bench?.map(...)` rows. Keep "Last refresh" and "Last error". Remove any import that becomes unused.
+
+Run: `rtk proxy npx jest && npm run typecheck`
+Expected: all suites pass, typecheck clean. Also `rtk proxy grep -rn "FogBuilder\|buildFog\|WORLD_RING\|cellsBounds\|fogBenchmark\|EDGE_PAINT\|FOG_FILL_PAINT" src` finds nothing.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A src
+git commit -m "feat(fog): draw fog as a heatmap of revealed cells, drop polygon fog"
+```
+
+- [ ] **Step 6: Device check (controller and user)**
+
+Release build (`npx expo run:ios --device 00008110-000A41CA3A39401E --configuration Release --no-bundler`). On the phone: Reset all data → map fully fogged; Import GPX (50 km route) → soft continuous clearing, zoomed in and out; Stress fill 50,000 → "Last refresh" first-load time, panning smooth; Import the second route (`fogmap-test-10km-b.gpx`) → small-update time at ~52k. Record under "Plan 2 device results" in the M1 spec.
