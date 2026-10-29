@@ -4,7 +4,6 @@ import { useFocusEffect } from 'expo-router';
 import { type ReactNode, useCallback, useEffect, useState } from 'react';
 import { Alert, Button, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { BANGKOK, STRESS_FILL_CELLS } from '../config';
-import { type FogBenchmarkRow, runFogBenchmark } from '../core/fogBenchmark';
 import { parseGpx } from '../core/gpx';
 import { runH3SelfCheck } from '../core/h3SelfCheck';
 import { cellCount } from '../db/cells';
@@ -13,8 +12,6 @@ import { onCellsChanged } from '../db/events';
 import { getDb } from '../db/open';
 import { fogStats } from '../map/fogStats';
 
-const BENCHMARK_SIZES = [10_000, 25_000, 50_000];
-
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export function DebugScreen() {
@@ -22,7 +19,6 @@ export function DebugScreen() {
   const [fog, setFog] = useState(fogStats);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
-  const [bench, setBench] = useState<FogBenchmarkRow[] | null>(null);
   const [selfCheck] = useState(runH3SelfCheck);
 
   const refresh = useCallback(() => {
@@ -62,14 +58,6 @@ export function DebugScreen() {
       return `Stress fill wrote ${n.toLocaleString()} cells`;
     });
 
-  const benchmark = () =>
-    run('Fog benchmark', async () => {
-      // Let the status render before buildFog blocks the JS thread.
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      setBench(runFogBenchmark(BENCHMARK_SIZES, BANGKOK, () => performance.now()));
-      return 'Fog benchmark done';
-    });
-
   const confirmReset = () =>
     Alert.alert('Reset all data?', 'Deletes every revealed cell, log row and setting.', [
       { text: 'Cancel', style: 'cancel' },
@@ -99,13 +87,6 @@ export function DebugScreen() {
             : 'none yet (open the Map tab)'}
         </Text>
         {fog.lastError && <Text style={styles.fail}>Last error: {fog.lastError}</Text>}
-        <Button title="Benchmark 10k / 25k / 50k" onPress={benchmark} disabled={busy} />
-        {bench?.map((r) => (
-          <Text key={r.cells}>
-            {r.cells.toLocaleString()} cells: {Math.round(r.ms)} ms, {r.polygons} polygons,{' '}
-            {r.vertices.toLocaleString()} vertices
-          </Text>
-        ))}
       </Section>
 
       <Section title="Test data">

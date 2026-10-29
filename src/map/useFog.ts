@@ -1,24 +1,23 @@
-import type { Feature, MultiPolygon } from 'geojson';
 import { useEffect, useState } from 'react';
 import { AppState } from 'react-native';
 import { FOG_REFRESH_MS } from '../config';
-import { type Bounds, buildFog } from '../core/fog';
+import type { Bounds } from '../core/fog';
 import { cellsAddedSince } from '../db/cells';
 import { onCellsChanged } from '../db/events';
 import { getDb } from '../db/open';
-import { FogSource } from './fogSource';
+import { type FogPoints, FogSource, NO_FOG_POINTS } from './fogSource';
 import { recordFogBuild, recordFogError } from './fogStats';
 import { createThrottle } from './throttle';
 
 export type FogState = {
-  fog: Feature<MultiPolygon>;
-  coarseFog: Feature<MultiPolygon>;
+  fog: FogPoints;
+  coarseFog: FogPoints;
   cellCount: number;
   areaKm2: number;
   bounds: Bounds | null;
 };
 
-const EMPTY: FogState = { fog: buildFog([]), coarseFog: buildFog([]), cellCount: 0, areaKm2: 0, bounds: null };
+const EMPTY: FogState = { fog: NO_FOG_POINTS, coarseFog: NO_FOG_POINTS, cellCount: 0, areaKm2: 0, bounds: null };
 
 // Lets touches and renders through between slices of the first load.
 const pause = () => new Promise<void>((resolve) => setTimeout(resolve, 0));

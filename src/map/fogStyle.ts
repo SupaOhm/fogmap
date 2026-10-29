@@ -1,35 +1,41 @@
-import type { FillLayerSpecification, LineLayerSpecification } from '@maplibre/maplibre-react-native';
+import type { HeatmapLayerSpecification } from '@maplibre/maplibre-react-native';
 import { BANGKOK } from '../config';
-
-const FOG_COLOR = '#10131c';
-
-export const FOG_FILL_PAINT: FillLayerSpecification['paint'] = {
-  'fill-color': FOG_COLOR,
-  'fill-opacity': 0.8,
-};
 
 // Web Mercator metres per pixel at zoom 0, at Bangkok's latitude (M1 is tuned for Bangkok);
 // it halves with every zoom level.
 const M_PER_PX_Z0 = 156_543 * Math.cos((BANGKOK.lat * Math.PI) / 180);
 
-type LineWidth = NonNullable<LineLayerSpecification['paint']>['line-width'];
+type HeatmapPaint = NonNullable<HeatmapLayerSpecification['paint']>;
 
-/** A width that stays `metres` wide on the ground at every zoom (doubles per zoom level). */
-function groundWidth(metres: number): LineWidth {
-  const px0 = metres / M_PER_PX_Z0;
-  return ['interpolate', ['exponential', 2], ['zoom'], 0, px0, 22, px0 * 2 ** 22];
-}
-
-/** A blurred line along every fog edge, for a soft boundary, `metres` wide on the ground. */
-function edgePaint(metres: number): LineLayerSpecification['paint'] {
+/**
+ * Fog as a heatmap of revealed cell centres, the way games do fog of war: the
+ * summed kernels are a blurred reveal mask and the colour ramp thresholds it:
+ * full fog below density 0.05, clear above 0.25, a soft rim in between. The
+ * kernel radius stays `radiusMetres` on the ground at every zoom.
+ */
+function fogPaint(radiusMetres: number): HeatmapPaint {
+  const px0 = radiusMetres / M_PER_PX_Z0;
   return {
-    'line-color': FOG_COLOR,
-    'line-opacity': 0.5,
-    'line-width': groundWidth(metres),
-    'line-blur': groundWidth(metres * 0.85),
+    'heatmap-radius': ['interpolate', ['exponential', 2], ['zoom'], 0, px0, 22, px0 * 2 ** 22],
+    'heatmap-weight': 1,
+    'heatmap-intensity': 2,
+    'heatmap-color': [
+      'interpolate',
+      ['linear'],
+      ['heatmap-density'],
+      0,
+      'rgba(16,19,28,0.82)',
+      0.05,
+      'rgba(16,19,28,0.82)',
+      0.15,
+      'rgba(16,19,28,0.4)',
+      0.25,
+      'rgba(16,19,28,0)',
+    ],
   };
 }
 
-/** ~14 px at zoom 15; under 2 px when zoomed out, so it never covers a corridor. */
-export const FINE_EDGE_PAINT = edgePaint(60);
-export const COARSE_EDGE_PAINT = edgePaint(400);
+// Res-10 cell centres are ~145 m apart near Bangkok, res-8 parents ~1 km: the
+// radii are about two spacings so neighbouring kernels merge.
+export const FINE_FOG_PAINT = fogPaint(320);
+export const COARSE_FOG_PAINT = fogPaint(1800);

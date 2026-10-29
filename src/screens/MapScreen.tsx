@@ -3,7 +3,7 @@ import { useRef } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BANGKOK, DEFAULT_ZOOM, FINE_FOG_MIN_ZOOM, MAP_STYLE_URL } from '../config';
-import { COARSE_EDGE_PAINT, FINE_EDGE_PAINT, FOG_FILL_PAINT } from '../map/fogStyle';
+import { COARSE_FOG_PAINT, FINE_FOG_PAINT } from '../map/fogStyle';
 import { useFog } from '../map/useFog';
 
 const FIT_PADDING = { top: 120, right: 60, bottom: 60, left: 60 };
@@ -24,14 +24,12 @@ export function MapScreen() {
           ref={camera}
           initialViewState={{ center: [BANGKOK.lng, BANGKOK.lat], zoom: DEFAULT_ZOOM }}
         />
-        {/* Zoomed out: fog from ~1 km parent hexagons, so explored areas read as places, not lines. */}
+        {/* Fog is a heatmap of revealed cell centres; zoomed out it uses ~1 km parent cells. */}
         <GeoJSONSource id="fog-coarse" data={coarseFog}>
-          <Layer id="fog-coarse-fill" type="fill" maxzoom={FINE_FOG_MIN_ZOOM} paint={FOG_FILL_PAINT} />
-          <Layer id="fog-coarse-edge" type="line" maxzoom={FINE_FOG_MIN_ZOOM} paint={COARSE_EDGE_PAINT} />
+          <Layer id="fog-coarse" type="heatmap" maxzoom={FINE_FOG_MIN_ZOOM} paint={COARSE_FOG_PAINT} />
         </GeoJSONSource>
         <GeoJSONSource id="fog" data={fog}>
-          <Layer id="fog-fill" type="fill" minzoom={FINE_FOG_MIN_ZOOM} paint={FOG_FILL_PAINT} />
-          <Layer id="fog-edge" type="line" minzoom={FINE_FOG_MIN_ZOOM} paint={FINE_EDGE_PAINT} />
+          <Layer id="fog" type="heatmap" minzoom={FINE_FOG_MIN_ZOOM} paint={FINE_FOG_PAINT} />
         </GeoJSONSource>
       </MapView>
       <View style={[styles.overlay, { top: insets.top + 8 }]} pointerEvents="box-none">

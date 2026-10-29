@@ -1,15 +1,21 @@
-import type { Feature, MultiPolygon } from 'geojson';
+import type { Feature, FeatureCollection, Point } from 'geojson';
 import { COARSE_FOG_RES } from '../config';
-import { type Bounds, FogBuilder, cellsBounds, parentCells } from '../core/fog';
+import { type Bounds, type LngLat, cellCentre, parentCells, pointsBounds } from '../core/fog';
 import { areaKm2 } from '../core/stats';
 
 /** Cells stored after a rowid, as returned by cellsAddedSince. */
 export type NewCells = { ids: string[]; lastRowid: number };
 
+/** Revealed places as points; the map draws them as a heatmap that clears the fog. */
+export type FogPoints = FeatureCollection<Point>;
+
+export const NO_FOG_POINTS: FogPoints = { type: 'FeatureCollection', features: [] };
+
 export type FogUpdate = {
-  fog: Feature<MultiPolygon>;
-  /** The same fog from the cells' res-COARSE_FOG_RES parents, for zoomed-out views. */
-  coarseFog: Feature<MultiPolygon>;
+  /** One point per stored cell, at its centre. */
+  fog: FogPoints;
+  /** One point per res-COARSE_FOG_RES parent of the stored cells, for zoomed-out views. */
+  coarseFog: FogPoints;
   cellCount: number;
   areaKm2: number;
   bounds: Bounds | null;
@@ -19,8 +25,12 @@ export type FogUpdate = {
   ms: number;
 };
 
-// ~0.14 ms per cell on an iPhone 14 (Release), so one slice blocks for ~0.3 s.
+// Keeps each blocking stretch of the first, large load short.
 const SLICE_CELLS = 2_000;
+
+function point(coordinates: LngLat): Feature<Point> {
+  return { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates } };
+}
 
 function unionBounds(a: Bounds | null, b: Bounds | null): Bounds | null {
   if (a === null) return b;
@@ -29,14 +39,14 @@ function unionBounds(a: Bounds | null, b: Bounds | null): Bounds | null {
 }
 
 /**
- * Keeps one FogBuilder for the app's lifetime and feeds it only the cells stored
- * since the last refresh, in slices with a pause between them. An update costs
- * the new cells plus one toFeature, never a full rebuild (a full rebuild of
- * 50,000 cells takes ~7 s on an iPhone 14).
+ * Keeps the fog's points for the app's lifetime and adds only the cells stored
+ * since the last refresh, in slices with a pause between them. A refresh costs
+ * a few h3 lookups per new cell; the GPU heatmap does the drawing.
  */
 export class FogSource {
-  private readonly builder = new FogBuilder();
-  private readonly coarse = new FogBuilder();
+  private points: Feature<Point>[] = [];
+  private coarsePoints: Feature<Point>[] = [];
+  private readonly coarseSeen = new Set<string>();
   private lastRowid = 0;
   private needsReset = false;
   private area = 0;
@@ -64,8 +74,9 @@ export class FogSource {
       let ms = 0;
       let start = this.now();
       if (reset) {
-        this.builder.reset();
-        this.coarse.reset();
+        this.points = [];
+        this.coarsePoints = [];
+        this.coarseSeen.clear();
         this.area = 0;
         this.bounds = null;
       }
@@ -76,18 +87,32 @@ export class FogSource {
           start = this.now();
         }
         const slice = ids.slice(i, i + this.sliceCells);
-        this.builder.add(slice);
-        this.coarse.add(parentCells(slice, COARSE_FOG_RES));
+        const centres = slice.map(cellCentre);
+        for (const c of centres) this.points.push(point(c));
+        for (const parent of parentCells(slice, COARSE_FOG_RES)) {
+          if (this.coarseSeen.has(parent)) continue;
+          this.coarseSeen.add(parent);
+          this.coarsePoints.push(point(cellCentre(parent)));
+        }
         this.area += areaKm2(slice);
-        this.bounds = unionBounds(this.bounds, cellsBounds(slice));
+        this.bounds = unionBounds(this.bounds, pointsBounds(centres));
       }
-      const fog = this.builder.toFeature();
-      const coarseFog = this.coarse.toFeature();
+      // Fresh arrays, so earlier results stay unchanged and the map sees new data.
+      const fog: FogPoints = { type: 'FeatureCollection', features: [...this.points] };
+      const coarseFog: FogPoints = { type: 'FeatureCollection', features: [...this.coarsePoints] };
       ms += this.now() - start;
       this.lastRowid = lastRowid;
-      return { fog, coarseFog, cellCount: this.builder.size, areaKm2: this.area, bounds: this.bounds, added: ids.length, ms };
+      return {
+        fog,
+        coarseFog,
+        cellCount: this.points.length,
+        areaKm2: this.area,
+        bounds: this.bounds,
+        added: ids.length,
+        ms,
+      };
     } catch (e) {
-      // The builder may hold part of a slice: rebuild everything next time.
+      // The points may hold part of a slice: rebuild everything next time.
       this.needsReset = true;
       throw e;
     }
