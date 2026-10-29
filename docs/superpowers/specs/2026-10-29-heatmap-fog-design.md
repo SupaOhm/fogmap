@@ -36,6 +36,12 @@ MapLibre's heatmap layer is the same pipeline on the GPU: every point adds a Gau
 
 **Removed (no longer used):** `FogBuilder`, `buildFog`, `WORLD_RING`, the polygon fog tests, `src/core/fogBenchmark.ts`, and the Debug tab's "Benchmark 10k / 25k / 50k" button. Kept in `src/core/fog.ts`: `Bounds`, `cellsBounds`, `parentCells`. The Debug tab keeps "Last refresh", which now measures the heatmap path. The old code stays in git history.
 
+## Device results (2026-10-29, iPhone 14)
+
+- **Release, first heatmap version** (radius 320 m / 1,800 m): 1,949-cell route = 61 ms; 50,000 cells first load = **1,555 ms** (polygon fog: 7,888 ms). User: still "blurred hex", meaning the edge followed the hexagon grid.
+- **Tuning (Debug, live reload):** the kernel sigma is now 1.2 cell spacings (radius ≈ 517 m fine, 3.6 km coarse), with intensity derived from cell area so a revealed area has a fixed density. It is boosted 2.5× because revealed areas looked tinted at the theoretical value. The ramp is fog below 0.2 and clear from 0.5. User: "looks way better", "lgtm".
+- Not measured yet: a small update with ~50k cells stored (second route). Watch "Last refresh" in the field.
+
 ## Known limits
 
 - Each refresh copies the point array and sends the whole collection to the native map; at 50k this transfer is not in the measured `ms`. The Release device check watches for a visible delay.
