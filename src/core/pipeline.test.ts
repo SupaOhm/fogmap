@@ -1,5 +1,5 @@
 import { gridDisk, latLngToCell } from 'h3-js';
-import { H3_RES } from './constants';
+import { H3_RES, REVEAL_RADIUS } from './constants';
 import { persistable, processFixes } from './pipeline';
 import { pathCells } from './reveal';
 import type { Fix } from './types';
@@ -20,9 +20,9 @@ test('no fixes changes nothing', () => {
   expect(r.nextLastPoint).toBeNull();
 });
 
-test('a single fix reveals its cell and 6 neighbours', () => {
+test('a single fix reveals its cell and the rings around it', () => {
   const r = processFixes([fix()], null);
-  expect(new Set(r.cells.keys())).toEqual(new Set(gridDisk(cellAt(LAT, LNG), 1)));
+  expect(new Set(r.cells.keys())).toEqual(new Set(gridDisk(cellAt(LAT, LNG), REVEAL_RADIUS)));
   for (const v of r.cells.values()) {
     expect(v).toEqual({ bucket: 'vehicle', firstTs: 0, lastTs: 0 });
   }
@@ -36,13 +36,13 @@ test('two fixes within limits reveal the corridor between them', () => {
   for (const c of pathCells(cellAt(LAT, LNG), cellAt(end.lat, end.lng), true)) {
     expect(r.cells.has(c)).toBe(true);
   }
-  expect(r.cells.size).toBeGreaterThan(14);
+  expect(r.cells.size).toBeGreaterThan(38);
 });
 
 test('a jump beyond the limits is not filled', () => {
   const far = fix({ ts: 1_800_000, lng: LNG + 0.05 }); // ~5.4 km, 30 min
   const r = processFixes([fix(), far], null);
-  expect(r.cells.size).toBe(14);
+  expect(r.cells.size).toBe(38);
 });
 
 test('rejected fixes are logged with a reason and do not move the previous point', () => {
@@ -88,7 +88,7 @@ test('an invalid fix is rejected without losing the rest of the batch', () => {
 test('reveals after a long gap even if the implied speed is impossible', () => {
   const r = processFixes([fix(), fix({ ts: 13 * 3_600_000, lat: 51.47, lng: -0.4543 })], null);
   expect(r.logRows.every((l) => l.accepted)).toBe(true);
-  expect(r.cells.size).toBe(14);
+  expect(r.cells.size).toBe(38);
 });
 
 test('gap filling still works from a persisted (cell-only) previous point', () => {

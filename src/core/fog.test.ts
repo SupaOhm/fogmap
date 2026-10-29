@@ -1,7 +1,7 @@
-import { cellToLatLng, cellsToMultiPolygon, gridDisk, latLngToCell } from 'h3-js';
+import { cellToLatLng, cellToParent, cellsToMultiPolygon, getResolution, gridDisk, latLngToCell } from 'h3-js';
 import type { Feature, MultiPolygon, Position } from 'geojson';
 import { H3_RES } from './constants';
-import { FogBuilder, WORLD_RING, buildFog, cellsBounds } from './fog';
+import { FogBuilder, WORLD_RING, buildFog, cellsBounds, parentCells } from './fog';
 import { stressCells } from './stress';
 
 const centre = latLngToCell(13.7563, 100.5018, H3_RES);
@@ -152,5 +152,18 @@ describe('cellsBounds', () => {
       expect(lat).toBeLessThanOrEqual(north);
     }
     expect(east - west).toBeGreaterThan(0.1);
+  });
+});
+
+describe('parentCells', () => {
+  test('maps cells to their unique parents at the given resolution', () => {
+    const disk = gridDisk(centre, 2);
+    const parents = parentCells(disk, 8);
+    expect(new Set(parents)).toEqual(new Set(disk.map((c) => cellToParent(c, 8))));
+    expect(parents.length).toBe(new Set(parents).size);
+    expect(parents.every((p) => getResolution(p) === 8)).toBe(true);
+  });
+  test('is empty without cells', () => {
+    expect(parentCells([], 8)).toEqual([]);
   });
 });

@@ -12,12 +12,13 @@ import { createThrottle } from './throttle';
 
 export type FogState = {
   fog: Feature<MultiPolygon>;
+  coarseFog: Feature<MultiPolygon>;
   cellCount: number;
   areaKm2: number;
   bounds: Bounds | null;
 };
 
-const EMPTY: FogState = { fog: buildFog([]), cellCount: 0, areaKm2: 0, bounds: null };
+const EMPTY: FogState = { fog: buildFog([]), coarseFog: buildFog([]), cellCount: 0, areaKm2: 0, bounds: null };
 
 // Lets touches and renders through between slices of the first load.
 const pause = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -42,7 +43,13 @@ export function useFog(): FogState {
         if (update === null) return;
         recordFogBuild({ ms: update.ms, added: update.added, cells: update.cellCount, at: Date.now() });
         if (mounted) {
-          setState({ fog: update.fog, cellCount: update.cellCount, areaKm2: update.areaKm2, bounds: update.bounds });
+          setState({
+            fog: update.fog,
+            coarseFog: update.coarseFog,
+            cellCount: update.cellCount,
+            areaKm2: update.areaKm2,
+            bounds: update.bounds,
+          });
         }
       },
       FOG_REFRESH_MS,

@@ -11,3 +11,7 @@ export const DEFAULT_ZOOM = 12;
 export const FOG_REFRESH_MS = 2000;
 
 export const STRESS_FILL_CELLS = 50_000;
+
+/** Below FINE_FOG_MIN_ZOOM the fog is drawn from the stored cells' parents at this resolution (~1 km hexagons). */
+export const COARSE_FOG_RES = 8;
+export const FINE_FOG_MIN_ZOOM = 12;

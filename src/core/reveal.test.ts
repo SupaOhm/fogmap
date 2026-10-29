@@ -43,12 +43,15 @@ describe('pathCells', () => {
 });
 
 describe('expandCells', () => {
-  test('one cell expands to itself plus 6 neighbours', () => {
-    expect(expandCells([a]).size).toBe(7);
+  test('by default one cell expands to itself plus two rings (19 cells)', () => {
+    expect(expandCells([a]).size).toBe(19);
   });
-  test('two adjacent cells expand to 10 unique cells', () => {
+  test('radius 1: one cell expands to itself plus 6 neighbours', () => {
+    expect(expandCells([a], 1).size).toBe(7);
+  });
+  test('radius 1: two adjacent cells expand to 10 unique cells', () => {
     const neighbour = gridDisk(a, 1).find((c) => c !== a)!;
-    expect(expandCells([a, neighbour]).size).toBe(10);
+    expect(expandCells([a, neighbour], 1).size).toBe(10);
   });
   test('radius 0 keeps only the input cells', () => {
     expect([...expandCells([a, b], 0)].sort()).toEqual([a, b].sort());

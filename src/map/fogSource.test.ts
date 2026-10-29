@@ -1,5 +1,6 @@
 import type { Feature, MultiPolygon, Position } from 'geojson';
-import { buildFog, cellsBounds } from '../core/fog';
+import { COARSE_FOG_RES } from '../config';
+import { buildFog, cellsBounds, parentCells } from '../core/fog';
 import { areaKm2 } from '../core/stats';
 import { stressCells } from '../core/stress';
 import { FogSource, type NewCells } from './fogSource';
@@ -18,6 +19,8 @@ const ringKey = (ring: Position[]) =>
 /** Order-independent shape of a fog feature, for comparing builds. */
 const shape = (f: Feature<MultiPolygon>) =>
   f.geometry.coordinates.map((polygon) => polygon.map(ringKey).join('|')).sort();
+
+const coarse = (cells: string[]) => shape(buildFog(parentCells(cells, COARSE_FOG_RES)));
 
 /** A fake cells table: row i has rowid i + 1, and rowids restart from 1 after clear(), like SQLite. */
 function table(initial: string[] = []) {
@@ -47,6 +50,7 @@ test('the first refresh adds every stored cell', async () => {
   expect(update.areaKm2).toBeCloseTo(areaKm2(CELLS), 9);
   expect(update.bounds).toEqual(cellsBounds(CELLS));
   expect(shape(update.fog)).toEqual(shape(buildFog(CELLS)));
+  expect(shape(update.coarseFog)).toEqual(coarse(CELLS));
 });
 
 test('a refresh with nothing new returns null', async () => {
@@ -66,6 +70,7 @@ test('later refreshes add only new cells and match a full build', async () => {
   expect(update.areaKm2).toBeCloseTo(areaKm2(CELLS), 9);
   expect(update.bounds).toEqual(cellsBounds(CELLS));
   expect(shape(update.fog)).toEqual(shape(buildFog(CELLS)));
+  expect(shape(update.coarseFog)).toEqual(coarse(CELLS));
 });
 
 test('pauses between slices, not before the first one', async () => {
@@ -108,6 +113,7 @@ test('after markReset the next refresh starts from scratch, though rowids restar
   expect(update.areaKm2).toBeCloseTo(areaKm2(CELLS.slice(0, 50)), 9);
   expect(update.bounds).toEqual(cellsBounds(CELLS.slice(0, 50)));
   expect(shape(update.fog)).toEqual(shape(buildFog(CELLS.slice(0, 50))));
+  expect(shape(update.coarseFog)).toEqual(coarse(CELLS.slice(0, 50)));
 });
 
 test('a reset to an empty table gives the all-fog world', async () => {
@@ -119,6 +125,7 @@ test('a reset to an empty table gives the all-fog world', async () => {
   const update = (await source.refresh())!;
   expect(update).toMatchObject({ cellCount: 0, added: 0, areaKm2: 0, bounds: null });
   expect(update.fog.geometry).toEqual(buildFog([]).geometry);
+  expect(update.coarseFog.geometry).toEqual(buildFog([]).geometry);
 });
 
 test('after a failed refresh the next one starts from scratch', async () => {

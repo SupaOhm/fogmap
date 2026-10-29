@@ -1,5 +1,6 @@
 import type { Feature, MultiPolygon } from 'geojson';
-import { type Bounds, FogBuilder, cellsBounds } from '../core/fog';
+import { COARSE_FOG_RES } from '../config';
+import { type Bounds, FogBuilder, cellsBounds, parentCells } from '../core/fog';
 import { areaKm2 } from '../core/stats';
 
 /** Cells stored after a rowid, as returned by cellsAddedSince. */
@@ -7,6 +8,8 @@ export type NewCells = { ids: string[]; lastRowid: number };
 
 export type FogUpdate = {
   fog: Feature<MultiPolygon>;
+  /** The same fog from the cells' res-COARSE_FOG_RES parents, for zoomed-out views. */
+  coarseFog: Feature<MultiPolygon>;
   cellCount: number;
   areaKm2: number;
   bounds: Bounds | null;
@@ -33,6 +36,7 @@ function unionBounds(a: Bounds | null, b: Bounds | null): Bounds | null {
  */
 export class FogSource {
   private readonly builder = new FogBuilder();
+  private readonly coarse = new FogBuilder();
   private lastRowid = 0;
   private needsReset = false;
   private area = 0;
@@ -61,6 +65,7 @@ export class FogSource {
       let start = this.now();
       if (reset) {
         this.builder.reset();
+        this.coarse.reset();
         this.area = 0;
         this.bounds = null;
       }
@@ -72,13 +77,15 @@ export class FogSource {
         }
         const slice = ids.slice(i, i + this.sliceCells);
         this.builder.add(slice);
+        this.coarse.add(parentCells(slice, COARSE_FOG_RES));
         this.area += areaKm2(slice);
         this.bounds = unionBounds(this.bounds, cellsBounds(slice));
       }
       const fog = this.builder.toFeature();
+      const coarseFog = this.coarse.toFeature();
       ms += this.now() - start;
       this.lastRowid = lastRowid;
-      return { fog, cellCount: this.builder.size, areaKm2: this.area, bounds: this.bounds, added: ids.length, ms };
+      return { fog, coarseFog, cellCount: this.builder.size, areaKm2: this.area, bounds: this.bounds, added: ids.length, ms };
     } catch (e) {
       // The builder may hold part of a slice: rebuild everything next time.
       this.needsReset = true;

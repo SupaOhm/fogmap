@@ -1,4 +1,4 @@
-import { cellToLatLng, cellToVertexes, vertexToLatLng } from 'h3-js';
+import { cellToLatLng, cellToParent, cellToVertexes, vertexToLatLng } from 'h3-js';
 import type { Feature, MultiPolygon, Position } from 'geojson';
 
 // Web Mercator's limit; MapLibre cannot show anything beyond it.
@@ -192,4 +192,11 @@ export function cellsBounds(cells: readonly string[]): Bounds | null {
     north = Math.max(north, lat);
   }
   return [west, south, east, north];
+}
+
+/** The unique parents of cells at a coarser resolution, in first-seen order (coarse fog when zoomed out). */
+export function parentCells(cells: Iterable<string>, res: number): string[] {
+  const parents = new Set<string>();
+  for (const c of cells) parents.add(cellToParent(c, res));
+  return [...parents];
 }
