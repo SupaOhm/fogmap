@@ -7,7 +7,7 @@
 **Architecture:**
 - `src/db/` talks to SQLite through a small `Db` interface. On device it wraps `expo-sqlite`; in Jest it wraps Node's built-in `node:sqlite`, so the real SQL runs in unit tests.
 - GPX import and stress fill write cells through the same `upsertCells` that live tracking will use in Plan 3. An in-process event tells the map to refresh.
-- The map rebuilds the whole fog shape with `buildFog`, at most once every 2 s and only while the app is in the foreground (spec option A).
+- The map keeps one `FogBuilder` alive (`FogSource`) and adds only cells stored since its last refresh, found by SQLite rowid. The first load is split into slices with a pause between them. Refreshes run at most once every 2 s and only while the app is in the foreground. (User decision after the Task 1 gate: a full rebuild of 50,000 cells takes ~7 s in Release, so updates are incremental and 50k-scale speed is deferred.)
 
 **Tech Stack:** Expo SDK 58, expo-router 58 (JS tabs, `src/app/`), expo-sqlite 58, `@maplibre/maplibre-react-native` 11.5, expo-document-picker 58, expo-file-system 58, h3-js 4.5, Jest via jest-expo, `node:sqlite` (Node 25) for DB tests.
 
@@ -50,13 +50,14 @@
 | `src/db/testing/nodeDb.ts` | Test-only `Db` backed by `node:sqlite` in memory |
 | `src/db/schema.ts` | `MIGRATIONS`, `migrate` |
 | `src/db/open.ts` | `getDb()`: shared expo-sqlite connection, WAL, migrated |
-| `src/db/cells.ts` | `upsertCells`, `allCellIds`, `cellCount` |
-| `src/db/events.ts` | `onCellsChanged`, `emitCellsChanged` |
+| `src/db/cells.ts` | `upsertCells`, `cellsAddedSince`, `cellCount` |
+| `src/db/events.ts` | `onCellsChanged`, `emitCellsChanged`, `CellsChange` (`'added'` or `'reset'`) |
 | `src/db/devData.ts` | `importFixes`, `stressFill`, `resetAllData` (Debug tools) |
 | `src/map/throttle.ts` | `createThrottle`: at most one run per interval, no overlap |
-| `src/map/fogStats.ts` | Last `buildFog` duration and cell count, for the Debug tab |
+| `src/map/fogSource.ts` | `FogSource`: one long-lived `FogBuilder` fed only new cells, in slices |
+| `src/map/fogStats.ts` | Last fog refresh: duration, cells added, total cells, for the Debug tab |
 | `src/map/fogStyle.ts` | Fog fill and soft-edge paint |
-| `src/map/useFog.ts` | Loads cells, builds fog (throttled, foreground only) |
+| `src/map/useFog.ts` | Drives `FogSource` (throttled, foreground only) and exposes its result |
 | `src/config.ts` | App constants: style URL, Bangkok, zoom, refresh interval, Debug flag, stress size |
 | `src/screens/MapScreen.tsx` | Map with fog, km² chip, "Fit revealed" button |
 | `src/screens/DebugScreen.tsx` | Cell count, fog timing, benchmark, GPX import, stress fill, reset, h3 self-check |
@@ -541,16 +542,18 @@ export class FogBuilder {
       if (this.cells.has(cell)) continue;
       this.cells.add(cell);
       const vertices = cellToVertexes(cell);
+      // Cancel shared edges first: a vertex briefly has two open edges otherwise,
+      // depending on which edge of the cell comes first.
+      const open: [string, string][] = [];
       for (let i = 0; i < vertices.length; i++) {
         const from = vertices[i]!;
         const to = vertices[(i + 1) % vertices.length]!;
-        if (this.edges.get(to) === from) {
-          this.edges.delete(to);
-        } else if (this.edges.has(from)) {
-          throw new Error(`fog outline touches itself at vertex ${from}`);
-        } else {
-          this.edges.set(from, to);
-        }
+        if (this.edges.get(to) === from) this.edges.delete(to);
+        else open.push([from, to]);
+      }
+      for (const [from, to] of open) {
+        if (this.edges.has(from)) throw new Error(`fog outline touches itself at vertex ${from}`);
+        this.edges.set(from, to);
       }
     }
   }
@@ -1015,10 +1018,11 @@ git commit -m "feat(db): Db interface, schema v1 with migrations, expo-sqlite co
 - Consumes: `Db`, `BindValue` (Task 2), `migrate` (Task 2), `RevealedCell` from `src/core/types.ts`, `openNodeDb` (tests).
 - Produces:
   - `export async function upsertCells(db: Db, cells: ReadonlyMap<string, RevealedCell>): Promise<void>`. It does not open a transaction; callers wrap it in `withExclusiveTransactionAsync`.
-  - `export async function allCellIds(db: Db): Promise<string[]>` (sorted)
+  - `export async function cellsAddedSince(db: Db, afterRowid: number): Promise<{ ids: string[]; lastRowid: number }>`: cells first stored after `afterRowid`, in insert order; `lastRowid` is the last one returned, or `afterRowid` when none. An upsert of an existing cell keeps its rowid, so revisits are not returned again.
   - `export async function cellCount(db: Db): Promise<number>`
-  - `export function onCellsChanged(listener: () => void): () => void` (returns unsubscribe)
-  - `export function emitCellsChanged(): void`
+  - `export type CellsChange = 'added' | 'reset'`
+  - `export function onCellsChanged(listener: (change: CellsChange) => void): () => void` (returns unsubscribe)
+  - `export function emitCellsChanged(change: CellsChange = 'added'): void`. `'reset'` means rows were deleted, so rowids may start again from 1.
 
 - [ ] **Step 1: Write the failing cell tests**
 
@@ -1026,7 +1030,7 @@ Create `src/db/cells.test.ts`:
 
 ```ts
 import type { RevealedCell } from '../core/types';
-import { allCellIds, cellCount, upsertCells } from './cells';
+import { cellCount, cellsAddedSince, upsertCells } from './cells';
 import { migrate } from './schema';
 import { openNodeDb } from './testing/nodeDb';
 import type { Db } from './types';
@@ -1090,7 +1094,7 @@ test('an empty batch is a no-op', async () => {
   expect(await cellCount(db)).toBe(0);
 });
 
-test('allCellIds returns every id, sorted', async () => {
+test('cellsAddedSince returns new cells in insert order, not revisited ones', async () => {
   const db = await freshDb();
   await upsertCells(
     db,
@@ -1099,7 +1103,18 @@ test('allCellIds returns every id, sorted', async () => {
       ['a', cell('walk', 1, 1)],
     ]),
   );
-  expect(await allCellIds(db)).toEqual(['a', 'b']);
+  const first = await cellsAddedSince(db, 0);
+  expect(first.ids).toEqual(['b', 'a']);
+  await upsertCells(
+    db,
+    new Map([
+      ['a', cell('walk', 2, 2)],
+      ['c', cell('walk', 2, 2)],
+    ]),
+  );
+  const second = await cellsAddedSince(db, first.lastRowid);
+  expect(second.ids).toEqual(['c']);
+  expect(await cellsAddedSince(db, second.lastRowid)).toEqual({ ids: [], lastRowid: second.lastRowid });
 });
 ```
 
@@ -1147,9 +1162,20 @@ export async function upsertCells(db: Db, cells: ReadonlyMap<string, RevealedCel
   }
 }
 
-export async function allCellIds(db: Db): Promise<string[]> {
-  const rows = await db.getAllAsync<{ h3: string }>('SELECT h3 FROM cells ORDER BY h3', []);
-  return rows.map((r) => r.h3);
+/**
+ * Cells first stored after afterRowid, in insert order. An upsert keeps a cell's
+ * rowid, so revisits are not returned again. Rowids can restart after a reset.
+ */
+export async function cellsAddedSince(
+  db: Db,
+  afterRowid: number,
+): Promise<{ ids: string[]; lastRowid: number }> {
+  const rows = await db.getAllAsync<{ rowid: number; h3: string }>(
+    'SELECT rowid, h3 FROM cells WHERE rowid > ? ORDER BY rowid',
+    [afterRowid],
+  );
+  const last = rows[rows.length - 1];
+  return { ids: rows.map((r) => r.h3), lastRowid: last ? last.rowid : afterRowid };
 }
 
 export async function cellCount(db: Db): Promise<number> {
@@ -1166,7 +1192,7 @@ Expected: PASS (5 tests).
 Create `src/db/events.test.ts`:
 
 ```ts
-import { emitCellsChanged, onCellsChanged } from './events';
+import { type CellsChange, emitCellsChanged, onCellsChanged } from './events';
 
 test('listeners hear changes until they unsubscribe', () => {
   const heard: string[] = [];
@@ -1192,6 +1218,15 @@ test('a listener that unsubscribes while being called does not break the others'
   offOther();
   expect(heard).toEqual(['once', 'other', 'other']);
 });
+
+test('listeners get the kind of change, added by default', () => {
+  const heard: CellsChange[] = [];
+  const off = onCellsChanged((change) => heard.push(change));
+  emitCellsChanged();
+  emitCellsChanged('reset');
+  off();
+  expect(heard).toEqual(['added', 'reset']);
+});
 ```
 
 - [ ] **Step 5: Run them to verify they fail**
@@ -1204,7 +1239,10 @@ Expected: FAIL: cannot find module `./events`.
 Create `src/db/events.ts`:
 
 ```ts
-type Listener = () => void;
+/** 'reset': rows were deleted, so rowids may start again from 1. */
+export type CellsChange = 'added' | 'reset';
+
+type Listener = (change: CellsChange) => void;
 
 const listeners = new Set<Listener>();
 
@@ -1216,8 +1254,8 @@ export function onCellsChanged(listener: Listener): () => void {
   };
 }
 
-export function emitCellsChanged(): void {
-  for (const listener of [...listeners]) listener();
+export function emitCellsChanged(change: CellsChange = 'added'): void {
+  for (const listener of [...listeners]) listener(change);
 }
 ```
 
@@ -1228,7 +1266,7 @@ Expected: all suites pass, typecheck clean.
 
 ```bash
 git add src/db/cells.ts src/db/cells.test.ts src/db/events.ts src/db/events.test.ts
-git commit -m "feat(db): cell upsert with slowest-bucket merge, cell queries, change event"
+git commit -m "feat(db): cell upsert with slowest-bucket merge, new-cell query, change event"
 ```
 
 ---
@@ -1394,7 +1432,7 @@ test('stressFill writes exactly count cells as walk, stamped now', async () => {
   ).toEqual({ lo: 5_000, hi: 5_000, modes: 1, mode: 'walk' });
 });
 
-test('resetAllData empties every table and notifies', async () => {
+test('resetAllData empties every table and notifies a reset', async () => {
   const db = await freshDb();
   await stressFill(db, 50, 0, BANGKOK);
   await db.runAsync(
@@ -1402,12 +1440,12 @@ test('resetAllData empties every table and notifies', async () => {
     [],
   );
   await db.runAsync("INSERT INTO settings VALUES ('tracking_enabled', '1')", []);
-  let changes = 0;
-  const off = onCellsChanged(() => changes++);
+  const heard: string[] = [];
+  const off = onCellsChanged((change) => heard.push(change));
   await resetAllData(db);
   off();
   expect([await count(db, 'cells'), await count(db, 'track_log'), await count(db, 'settings')]).toEqual([0, 0, 0]);
-  expect(changes).toBe(1);
+  expect(heard).toEqual(['reset']);
 });
 ```
 
@@ -1471,7 +1509,7 @@ export async function resetAllData(db: Db): Promise<void> {
   await db.withExclusiveTransactionAsync(async (txn) => {
     await txn.execAsync('DELETE FROM cells; DELETE FROM track_log; DELETE FROM settings;');
   });
-  emitCellsChanged();
+  emitCellsChanged('reset');
 }
 ```
 
@@ -1491,16 +1529,20 @@ git commit -m "feat(db): GPX import, stress fill and reset; synthetic GPX times 
 
 ---
 
-### Task 5: Fog refresh throttle and fog timing
+### Task 5: Fog refresh throttle, incremental fog source, and fog timing
 
 **Files:**
-- Create: `src/map/throttle.ts`, `src/map/throttle.test.ts`, `src/map/fogStats.ts`, `src/map/fogStats.test.ts`
+- Create: `src/map/throttle.ts`, `src/map/throttle.test.ts`, `src/map/fogSource.ts`, `src/map/fogSource.test.ts`, `src/map/fogStats.ts`, `src/map/fogStats.test.ts`
 
 **Interfaces:**
+- Consumes: `FogBuilder`, `cellsBounds`, `Bounds` (Task 1b / Task 1), `areaKm2` (Plan 1, `src/core/stats.ts`, takes `Iterable<string>`), `stressCells` (Plan 1, tests). The `readSince` function `FogSource` takes has the same shape as `cellsAddedSince(db, afterRowid)` from Task 3, minus the `db`.
 - Produces:
   - `export type Throttle = { request(): void; cancel(): void }`
   - `export function createThrottle(run: () => Promise<void>, intervalMs: number, onError: (e: unknown) => void): Throttle`
-  - `export type FogBuild = { ms: number; cells: number; at: number }`
+  - `export type NewCells = { ids: string[]; lastRowid: number }`
+  - `export type FogUpdate = { fog: Feature<MultiPolygon>; cellCount: number; areaKm2: number; bounds: Bounds | null; added: number; ms: number }`
+  - `export class FogSource { constructor(readSince: (afterRowid: number) => Promise<NewCells>, pause: () => Promise<void>, now: () => number, sliceCells?: number); markReset(): void; refresh(): Promise<FogUpdate | null> }`
+  - `export type FogBuild = { ms: number; added: number; cells: number; at: number }`
   - `export function recordFogBuild(build: FogBuild): void`
   - `export function recordFogError(e: unknown): void`
   - `export function fogStats(): { lastBuild: FogBuild | null; lastError: string | null }`
@@ -1664,7 +1706,265 @@ export function createThrottle(
 Run: `rtk proxy npx jest src/map/throttle.test.ts`
 Expected: PASS (5 tests).
 
-- [ ] **Step 4: Write the failing fog-stats test**
+- [ ] **Step 4: Write the failing fog source tests**
+
+`FogSource` keeps one `FogBuilder` for the app's lifetime. Each refresh reads only cells stored after the last rowid it saw, adds them in slices of `sliceCells` (default 2,000) with an awaited `pause()` between slices, so the UI can respond during the first, large load, then calls `toFeature()` once. It also keeps the revealed area and bounds up to date from the new cells only, because `areaKm2` and `cellsBounds` call h3 once per cell and are too slow to repeat over every cell. Rules:
+- Nothing new (and no pending reset) → `refresh()` resolves `null`.
+- `markReset()` → the next refresh clears the builder, area and bounds, and reads from rowid 0. This is needed because SQLite reuses rowids from 1 once the table is emptied.
+- If a refresh fails at any point (read, pause or build), the next refresh starts from scratch, because the builder may hold a partial slice.
+- `ms` is JS time spent reading results into the builder and building, not counting the pauses.
+
+Create `src/map/fogSource.test.ts`:
+
+```ts
+import type { Feature, MultiPolygon, Position } from 'geojson';
+import { buildFog, cellsBounds } from '../core/fog';
+import { areaKm2 } from '../core/stats';
+import { stressCells } from '../core/stress';
+import { FogSource, type NewCells } from './fogSource';
+
+const BANGKOK = { lat: 13.7563, lng: 100.5018 };
+const CELLS = stressCells(300, 1, BANGKOK);
+
+/** Order-independent key of a closed ring: its vertices, rounded and sorted. */
+const ringKey = (ring: Position[]) =>
+  ring
+    .slice(0, -1)
+    .map(([lng, lat]) => `${lng!.toFixed(7)},${lat!.toFixed(7)}`)
+    .sort()
+    .join(';');
+
+/** Order-independent shape of a fog feature, for comparing builds. */
+const shape = (f: Feature<MultiPolygon>) =>
+  f.geometry.coordinates.map((polygon) => polygon.map(ringKey).join('|')).sort();
+
+/** A fake cells table: row i has rowid i + 1, and rowids restart from 1 after clear(), like SQLite. */
+function table(initial: string[] = []) {
+  let rows = [...initial];
+  return {
+    insert(ids: string[]) {
+      rows.push(...ids);
+    },
+    clear() {
+      rows = [];
+    },
+    readSince: async (after: number): Promise<NewCells> => {
+      const ids = rows.slice(after);
+      return { ids, lastRowid: after + ids.length };
+    },
+  };
+}
+
+const noPause = async () => {};
+const now = () => 0;
+
+test('the first refresh adds every stored cell', async () => {
+  const source = new FogSource(table(CELLS).readSince, noPause, now);
+  const update = (await source.refresh())!;
+  expect(update.cellCount).toBe(300);
+  expect(update.added).toBe(300);
+  expect(update.areaKm2).toBeCloseTo(areaKm2(CELLS), 9);
+  expect(update.bounds).toEqual(cellsBounds(CELLS));
+  expect(shape(update.fog)).toEqual(shape(buildFog(CELLS)));
+});
+
+test('a refresh with nothing new returns null', async () => {
+  const source = new FogSource(table(CELLS).readSince, noPause, now);
+  await source.refresh();
+  expect(await source.refresh()).toBeNull();
+});
+
+test('later refreshes add only new cells and match a full build', async () => {
+  const t = table(CELLS.slice(0, 200));
+  const source = new FogSource(t.readSince, noPause, now);
+  await source.refresh();
+  t.insert(CELLS.slice(200));
+  const update = (await source.refresh())!;
+  expect(update.added).toBe(100);
+  expect(update.cellCount).toBe(300);
+  expect(update.areaKm2).toBeCloseTo(areaKm2(CELLS), 9);
+  expect(update.bounds).toEqual(cellsBounds(CELLS));
+  expect(shape(update.fog)).toEqual(shape(buildFog(CELLS)));
+});
+
+test('pauses between slices, not before the first one', async () => {
+  let pauses = 0;
+  const source = new FogSource(
+    table(CELLS).readSince,
+    async () => {
+      pauses++;
+    },
+    now,
+    100,
+  );
+  await source.refresh();
+  expect(pauses).toBe(2);
+});
+
+test('ms counts work between pauses, not the pauses', async () => {
+  let clock = 0;
+  const source = new FogSource(
+    table(CELLS).readSince,
+    async () => {
+      clock += 1_000;
+    },
+    () => clock,
+    100,
+  );
+  expect((await source.refresh())!.ms).toBe(0);
+});
+
+test('after markReset the next refresh starts from scratch, though rowids restarted', async () => {
+  const t = table(CELLS);
+  const source = new FogSource(t.readSince, noPause, now);
+  await source.refresh();
+  t.clear();
+  t.insert(CELLS.slice(0, 50));
+  source.markReset();
+  const update = (await source.refresh())!;
+  expect(update.cellCount).toBe(50);
+  expect(update.added).toBe(50);
+  expect(update.areaKm2).toBeCloseTo(areaKm2(CELLS.slice(0, 50)), 9);
+  expect(update.bounds).toEqual(cellsBounds(CELLS.slice(0, 50)));
+  expect(shape(update.fog)).toEqual(shape(buildFog(CELLS.slice(0, 50))));
+});
+
+test('a reset to an empty table gives the all-fog world', async () => {
+  const t = table(CELLS);
+  const source = new FogSource(t.readSince, noPause, now);
+  await source.refresh();
+  t.clear();
+  source.markReset();
+  const update = (await source.refresh())!;
+  expect(update).toMatchObject({ cellCount: 0, added: 0, areaKm2: 0, bounds: null });
+  expect(update.fog.geometry).toEqual(buildFog([]).geometry);
+});
+
+test('after a failed refresh the next one starts from scratch', async () => {
+  const t = table(CELLS);
+  const asked: number[] = [];
+  let fail = true;
+  const source = new FogSource(
+    async (after) => {
+      asked.push(after);
+      return t.readSince(after);
+    },
+    async () => {
+      if (fail) throw new Error('interrupted');
+    },
+    now,
+    100,
+  );
+  await expect(source.refresh()).rejects.toThrow('interrupted');
+  fail = false;
+  const update = (await source.refresh())!;
+  expect(asked).toEqual([0, 0]);
+  expect(update.cellCount).toBe(300);
+  expect(update.added).toBe(300);
+  expect(update.areaKm2).toBeCloseTo(areaKm2(CELLS), 9);
+});
+```
+
+Run: `rtk proxy npx jest src/map/fogSource.test.ts`
+Expected: FAIL: cannot find module `./fogSource`.
+
+Create `src/map/fogSource.ts`:
+
+```ts
+import type { Feature, MultiPolygon } from 'geojson';
+import { type Bounds, FogBuilder, cellsBounds } from '../core/fog';
+import { areaKm2 } from '../core/stats';
+
+/** Cells stored after a rowid, as returned by cellsAddedSince. */
+export type NewCells = { ids: string[]; lastRowid: number };
+
+export type FogUpdate = {
+  fog: Feature<MultiPolygon>;
+  cellCount: number;
+  areaKm2: number;
+  bounds: Bounds | null;
+  /** Cells added by this refresh. */
+  added: number;
+  /** JS time spent, not counting the pauses between slices. */
+  ms: number;
+};
+
+// ~0.14 ms per cell on an iPhone 14 (Release), so one slice blocks for ~0.3 s.
+const SLICE_CELLS = 2_000;
+
+function unionBounds(a: Bounds | null, b: Bounds | null): Bounds | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
+}
+
+/**
+ * Keeps one FogBuilder for the app's lifetime and feeds it only the cells stored
+ * since the last refresh, in slices with a pause between them. An update costs
+ * the new cells plus one toFeature, never a full rebuild (a full rebuild of
+ * 50,000 cells takes ~7 s on an iPhone 14).
+ */
+export class FogSource {
+  private readonly builder = new FogBuilder();
+  private lastRowid = 0;
+  private needsReset = false;
+  private area = 0;
+  private bounds: Bounds | null = null;
+
+  constructor(
+    private readonly readSince: (afterRowid: number) => Promise<NewCells>,
+    private readonly pause: () => Promise<void>,
+    private readonly now: () => number,
+    private readonly sliceCells = SLICE_CELLS,
+  ) {}
+
+  /** Stored cells were deleted: the next refresh starts again from rowid 0. */
+  markReset(): void {
+    this.needsReset = true;
+  }
+
+  /** The fog after adding newly stored cells, or null when nothing changed. */
+  async refresh(): Promise<FogUpdate | null> {
+    const reset = this.needsReset;
+    this.needsReset = false;
+    try {
+      const { ids, lastRowid } = await this.readSince(reset ? 0 : this.lastRowid);
+      if (!reset && ids.length === 0) return null;
+      let ms = 0;
+      let start = this.now();
+      if (reset) {
+        this.builder.reset();
+        this.area = 0;
+        this.bounds = null;
+      }
+      for (let i = 0; i < ids.length; i += this.sliceCells) {
+        if (i > 0) {
+          ms += this.now() - start;
+          await this.pause();
+          start = this.now();
+        }
+        const slice = ids.slice(i, i + this.sliceCells);
+        this.builder.add(slice);
+        this.area += areaKm2(slice);
+        this.bounds = unionBounds(this.bounds, cellsBounds(slice));
+      }
+      const fog = this.builder.toFeature();
+      ms += this.now() - start;
+      this.lastRowid = lastRowid;
+      return { fog, cellCount: this.builder.size, areaKm2: this.area, bounds: this.bounds, added: ids.length, ms };
+    } catch (e) {
+      // The builder may hold part of a slice: rebuild everything next time.
+      this.needsReset = true;
+      throw e;
+    }
+  }
+}
+```
+
+Run: `rtk proxy npx jest src/map/fogSource.test.ts`
+Expected: PASS (8 tests).
+
+- [ ] **Step 4b: Write the failing fog-stats test**
 
 Create `src/map/fogStats.test.ts`:
 
@@ -1673,11 +1973,11 @@ import { fogStats, recordFogBuild, recordFogError } from './fogStats';
 
 test('keeps the last build and the last error until the next success', () => {
   expect(fogStats()).toEqual({ lastBuild: null, lastError: null });
-  recordFogBuild({ ms: 12, cells: 100, at: 1 });
+  recordFogBuild({ ms: 12, added: 100, cells: 100, at: 1 });
   recordFogError(new Error('db closed'));
-  expect(fogStats()).toEqual({ lastBuild: { ms: 12, cells: 100, at: 1 }, lastError: 'db closed' });
-  recordFogBuild({ ms: 15, cells: 120, at: 2 });
-  expect(fogStats()).toEqual({ lastBuild: { ms: 15, cells: 120, at: 2 }, lastError: null });
+  expect(fogStats()).toEqual({ lastBuild: { ms: 12, added: 100, cells: 100, at: 1 }, lastError: 'db closed' });
+  recordFogBuild({ ms: 15, added: 20, cells: 120, at: 2 });
+  expect(fogStats()).toEqual({ lastBuild: { ms: 15, added: 20, cells: 120, at: 2 }, lastError: null });
   recordFogError('plain string');
   expect(fogStats().lastError).toBe('plain string');
 });
@@ -1693,12 +1993,13 @@ Expected: FAIL: cannot find module `./fogStats`.
 Create `src/map/fogStats.ts`:
 
 ```ts
-export type FogBuild = { ms: number; cells: number; at: number };
+/** One fog refresh: JS time spent, cells added by it, total cells afterwards. */
+export type FogBuild = { ms: number; added: number; cells: number; at: number };
 
 let lastBuild: FogBuild | null = null;
 let lastError: string | null = null;
 
-/** Shown on the Debug tab: how long the last fog rebuild took. */
+/** Shown on the Debug tab: how long the last fog refresh took. */
 export function recordFogBuild(build: FogBuild): void {
   lastBuild = build;
   lastError = null;
@@ -1720,7 +2021,7 @@ Expected: all suites pass, typecheck clean.
 
 ```bash
 git add src/map
-git commit -m "feat(map): fog refresh throttle and fog build timing"
+git commit -m "feat(map): fog refresh throttle, incremental fog source, fog timing"
 ```
 
 ---
@@ -1733,7 +2034,7 @@ git commit -m "feat(map): fog refresh throttle and fog build timing"
 - Create: `src/config.ts`, `src/map/fogStyle.ts`, `src/map/useFog.ts`, `src/screens/MapScreen.tsx`, `src/app/_layout.tsx`, `src/app/index.tsx`
 
 **Interfaces:**
-- Consumes: `buildFog`, `cellsBounds`, `Bounds` (Task 1), `areaKm2` (Plan 1), `getDb` (Task 2), `allCellIds`, `onCellsChanged` (Task 3), `createThrottle`, `recordFogBuild`, `recordFogError` (Task 5).
+- Consumes: `buildFog`, `Bounds` (Task 1), `getDb` (Task 2), `cellsAddedSince`, `onCellsChanged` (Task 3), `createThrottle`, `FogSource`, `recordFogBuild`, `recordFogError` (Task 5).
 - Produces:
   - `src/config.ts` exports `DEBUG_SCREEN: boolean`, `MAP_STYLE_URL`, `BANGKOK: { lat: number; lng: number }`, `DEFAULT_ZOOM`, `FOG_REFRESH_MS`, `STRESS_FILL_CELLS`
   - `useFog(): FogState` with `FogState = { fog: Feature<MultiPolygon>; cellCount: number; areaKm2: number; bounds: Bounds | null }`
@@ -1834,11 +2135,11 @@ import type { Feature, MultiPolygon } from 'geojson';
 import { useEffect, useState } from 'react';
 import { AppState } from 'react-native';
 import { FOG_REFRESH_MS } from '../config';
-import { type Bounds, buildFog, cellsBounds } from '../core/fog';
-import { areaKm2 } from '../core/stats';
-import { allCellIds } from '../db/cells';
+import { type Bounds, buildFog } from '../core/fog';
+import { cellsAddedSince } from '../db/cells';
 import { onCellsChanged } from '../db/events';
 import { getDb } from '../db/open';
+import { FogSource } from './fogSource';
 import { recordFogBuild, recordFogError } from './fogStats';
 import { createThrottle } from './throttle';
 
@@ -1851,23 +2152,30 @@ export type FogState = {
 
 const EMPTY: FogState = { fog: buildFog([]), cellCount: 0, areaKm2: 0, bounds: null };
 
+// Lets touches and renders through between slices of the first load.
+const pause = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
 /**
- * Fog for the map: rebuilt from every stored cell when cells change or the app
- * returns to the foreground, at most once every FOG_REFRESH_MS, never in the background.
+ * Fog for the map. Adds newly stored cells when cells change or the app returns
+ * to the foreground, at most once every FOG_REFRESH_MS, never in the background.
  */
 export function useFog(): FogState {
   const [state, setState] = useState<FogState>(EMPTY);
 
   useEffect(() => {
     let mounted = true;
+    const source = new FogSource(
+      async (afterRowid) => cellsAddedSince(await getDb(), afterRowid),
+      pause,
+      () => performance.now(),
+    );
     const throttle = createThrottle(
       async () => {
-        const ids = await allCellIds(await getDb());
-        const start = performance.now();
-        const fog = buildFog(ids);
-        recordFogBuild({ ms: performance.now() - start, cells: ids.length, at: Date.now() });
+        const update = await source.refresh();
+        if (update === null) return;
+        recordFogBuild({ ms: update.ms, added: update.added, cells: update.cellCount, at: Date.now() });
         if (mounted) {
-          setState({ fog, cellCount: ids.length, areaKm2: areaKm2(ids), bounds: cellsBounds(ids) });
+          setState({ fog: update.fog, cellCount: update.cellCount, areaKm2: update.areaKm2, bounds: update.bounds });
         }
       },
       FOG_REFRESH_MS,
@@ -1875,7 +2183,8 @@ export function useFog(): FogState {
     );
 
     throttle.request();
-    const offCells = onCellsChanged(() => {
+    const offCells = onCellsChanged((change) => {
+      if (change === 'reset') source.markReset();
       if (AppState.currentState === 'active') throttle.request();
     });
     const appState = AppState.addEventListener('change', (s) => {
@@ -2117,9 +2426,9 @@ export function DebugScreen() {
 
       <Section title="Fog">
         <Text>
-          Last rebuild:{' '}
+          Last refresh:{' '}
           {fog.lastBuild
-            ? `${Math.round(fog.lastBuild.ms)} ms for ${fog.lastBuild.cells.toLocaleString()} cells`
+            ? `${Math.round(fog.lastBuild.ms)} ms, +${fog.lastBuild.added.toLocaleString()} → ${fog.lastBuild.cells.toLocaleString()} cells`
             : 'none yet (open the Map tab)'}
         </Text>
         {fog.lastError && <Text style={styles.fail}>Last error: {fog.lastError}</Text>}
@@ -2215,7 +2524,7 @@ git commit -m "feat(debug): Debug tab with GPX import, stress fill, fog benchmar
    - the h3 self-check shows PASS;
    - "Stress fill 50,000 cells" reports 50,000;
    - the Map tab then shows a revealed corridor near Bangkok, and "Fit revealed" frames it;
-   - the Debug tab's "Last rebuild" shows a time for 50,000 cells;
+   - the Debug tab's "Last refresh" shows a time and "+50,000 → 50,000 cells";
    - "Reset all data" asks for confirmation, then the map is fully fogged again.
 
 ---
@@ -2327,10 +2636,11 @@ git commit -m "chore: script to generate a synthetic GPX test route"
 1. Build Release: `npx expo run:ios --device 00008110-000A41CA3A39401E --configuration Release`.
 2. Send the generated `.gpx` to the iPhone (AirDrop, then "Save to Files").
 3. On the phone:
-   - **GPX corridor:** Debug → Reset all data, then Import GPX…, then Map → Fit revealed. Zoom along the route: the corridor must have **no visible gaps**. Note the cell count and the "Last rebuild" time.
+   - **GPX corridor:** Debug → Reset all data, then Import GPX…, then Map → Fit revealed. Zoom along the route: the corridor must have **no visible gaps**. Note the cell count and the "Last refresh" time.
    - **Fog shape:** the fog should be dark everywhere except the corridor. If the whole map is clear, or the revealed area is dark and the rest clear, the ring winding is wrong. Report it, and fix `buildFog` to reverse the rings before going on.
    - **Soft edge:** decide with the user whether the blurred edge looks right; if not, remove the `fog-edge` layer.
-   - **50,000 cells:** Debug → Stress fill 50,000, then go to Map. Pan and zoom for 30 s. It must stay smooth (no visible stutter while panning). Note the "Last rebuild" time.
+   - **50,000 cells:** Debug → Stress fill 50,000, then go to Map. Pan and zoom for 30 s. It must stay smooth (no visible stutter while panning), including while the first load runs. Note the "Last refresh" time (first load of 50,000).
+   - **Small update at 50,000:** with the 50,000 cells still stored, Debug → Import GPX… again, then go to Map. Note the "Last refresh" time: it adds only the corridor's cells, but `toFeature` still walks every outline, so this is the per-update cost at 50k. Also note whether the tab buttons stutter for a moment.
    - **Resolution 10 look:** take a screenshot zoomed into a street-level part of the corridor, for the open question on resolution.
-4. Record the results in the spec, in a new subsection `### Plan 2 device results (YYYY-MM-DD, Release)` under "Fog performance": GPX cells and rebuild ms, corridor gaps yes/no, 50k rebuild ms, panning smooth yes/no, soft edge kept or removed, and the user's first impression of resolution 10.
+4. Record the results in the spec, in a new subsection `### Plan 2 device results (YYYY-MM-DD, Release)` under "Fog performance": GPX cells and refresh ms, corridor gaps yes/no, 50k first-load ms, small-update ms at 50k, panning smooth yes/no, soft edge kept or removed, and the user's first impression of resolution 10.
 5. Commit with `docs(spec): record Plan 2 device results`.

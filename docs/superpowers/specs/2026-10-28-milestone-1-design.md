@@ -134,6 +134,8 @@ If the on-device stress test at 50,000 cells is not acceptable, switch `buildFog
 
 **Edge-cancellation builder (Task 1b, 2026-10-29, iPhone 14, Release):** buildFog 10k = 1,335 ms, 25k = 3,429 ms, 50k = **7,153 ms** (same 156 polygons, 62,421 vertices). About 30% faster, ~0.14 ms per cell, still ~7× over the gate. In Node at 50k, `add` takes ~236 ms and `toFeature` ~155 ms (~70 ms warm), so incremental adds alone would remove roughly 60% of the per-update cost; `toFeature` stays linear in total cells.
 
+**Decision (2026-10-29, user):** keep one `FogBuilder` alive and add only cells stored since the last refresh (found by SQLite rowid); split the first load into slices with a pause between them so the UI keeps responding. 50k-scale speed is deferred to a later milestone (chunking or a native builder). **Known limit:** each update still runs `toFeature` over every outline, so update time grows with total cells (estimated ~0.5 s at 10k and a few seconds at 50k on the iPhone 14). Map panning is native and stays smooth; JS buttons may stutter briefly during an update. The Debug tab shows each refresh's time so this can be watched in the field.
+
 ## Verification
 
 | Acceptance criterion | How it is checked |
