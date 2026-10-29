@@ -1,6 +1,7 @@
 # Milestone 1 design: solo fog map
 
 Status: approved in brainstorming on 2026-10-28.
+Update: fog is now a heatmap of cell centres, not polygons; `buildFog` and the polygon fog described below are historical, see [the heatmap spec](2026-10-29-heatmap-fog-design.md).
 Requirements: [docs/milestone-1.md](../../milestone-1.md). This document records how they will be built and every decision that refines or changes them.
 
 ## Changes to the milestone spec
@@ -36,7 +37,7 @@ Pure TypeScript, no React or Expo imports, fully unit-tested with Jest.
 | `pipeline.ts` | `processFixes(fixes, lastPoint)` returns `{ cells: Map<h3, RevealedCell>, logRows, nextLastPoint }`; `firstTs`/`lastTs` are the earliest/latest fix times that revealed the cell, so the database sets `first_seen`/`last_seen` from fix time, not wall-clock time |
 | `stats.ts` | Area as the sum of `cellArea` (km²); today / this week / all-time windows using local midnight and a Monday week start; battery %/hour per tracking mode, ignoring intervals where the level rose (charging) |
 | `fog.ts` | `buildFog(cells)` returns GeoJSON: a world-covering polygon with the revealed area (`cellsToMultiPolygon`) as holes |
-| `gpx.ts` | Parse a GPX string into `Fix[]` with accuracy 5 m and `speed: null`; when timestamps are missing, synthesize them at walking pace (5 km/h) |
+| `gpx.ts` | Parse a GPX string into `Fix[]` with accuracy 5 m and `speed: null`; when timestamps are missing, synthesize them at walking pace (5 km/h), ending at the given end time (the import time) |
 | `stress.ts` | Generate N cells along a random walk, for the rendering benchmark |
 
 **Fix checks, in order** (amended after the Plan 1 final review, 2026-10-28):
@@ -106,7 +107,7 @@ Bottom tabs with expo-router: **Map**, **Stats**, **Debug** (Debug only when the
 
 **Map**
 - MapLibre with an OpenFreeMap style, picked during scaffolding from the styles currently published; the style URL is a constant, and MapTiler is the fallback.
-- Fog: `buildFog` output in a ShapeSource drawn by a dark FillLayer (~0.8 opacity), plus a blurred LineLayer on the same shape for a soft edge, dropped if it looks wrong.
+- Fog: `buildFog` output in a ShapeSource drawn by a dark FillLayer (~0.8 opacity), plus a blurred LineLayer on the same shape for a soft edge, dropped if it looks wrong. (Superseded: fog is now a heatmap, see the heatmap spec.)
 - Refresh on the tracking event and when the app returns to the foreground, debounced so `buildFog` runs at most once every 2 s.
 - Follow-me button using MapLibre's user location and camera follow (foreground only, separate from tracking).
 - Tracking on/off toggle, km² chip, banner when "Always" is missing.
@@ -129,6 +130,22 @@ Use option A: rebuild the whole fog shape (debounced, foreground only). Expected
 If the on-device stress test at 50,000 cells is not acceptable, switch `buildFog` internally to chunking: group cells by a coarse parent cell, cache each group's outline, rebuild only touched groups. Callers do not change.
 
 **Measured baseline (2026-10-28, iPhone 14, Debug build, Hermes):** `cellsToMultiPolygon` on 7,651 cells took **3,110 ms** (Node: ~240 ms for 51,000 cells). Debug Hermes is slower than Release, so Plan 2 must measure `buildFog` in a **Release** build early, before the map screen depends on it. If 50,000 cells take more than ~1 s in Release, implement chunking in Plan 2 rather than later.
+
+**Release build (2026-10-29, iPhone 14, Hermes):** buildFog 10k = 2,055 ms, 25k = 5,206 ms, 50k = **10,324 ms** (156 polygons, 62,421 vertices); `cellsToMultiPolygon` on 7,651 cells = 1,377 ms. Cost is linear at ~0.2 ms per cell, about 40× slower than Node. **The 1 s gate fails by ~10×**, and even a typical few thousand cells would block the JS thread for over half a second per rebuild. Next step is the user's decision (Plan 2, Task 1 gate).
+
+**Edge-cancellation builder (Task 1b, 2026-10-29, iPhone 14, Release):** buildFog 10k = 1,335 ms, 25k = 3,429 ms, 50k = **7,153 ms** (same 156 polygons, 62,421 vertices). About 30% faster, ~0.14 ms per cell, still ~7× over the gate. In Node at 50k, `add` takes ~236 ms and `toFeature` ~155 ms (~70 ms warm), so incremental adds alone would remove roughly 60% of the per-update cost; `toFeature` stays linear in total cells.
+
+**Decision (2026-10-29, user):** keep one `FogBuilder` alive and add only cells stored since the last refresh (found by SQLite rowid); split the first load into slices with a pause between them so the UI keeps responding. 50k-scale speed is deferred to a later milestone (chunking or a native builder). **Known limit:** each update still runs `toFeature` over every outline, so update time grows with total cells (estimated ~0.5 s at 10k and a few seconds at 50k on the iPhone 14). Map panning is native and stays smooth; JS buttons may stutter briefly during an update. The Debug tab shows each refresh's time so this can be watched in the field.
+
+### Plan 2 device results (2026-10-29, Release, iPhone 14)
+
+- **GPX corridor** (synthetic 50 km, 428 points): 428/428 accepted, 1,171 cells, 20.92 km², fog refresh **188 ms**. No gaps along the corridor. Fog winding correct (dark everywhere except revealed).
+- **50,000 cells:** first load **7,888 ms** (+49,687 → 50,858 cells; Debug build: 17,259 ms). Panning stays smooth, with a short (<1 s) hitch while the fog loads.
+- **Small update at 50k:** not measured: re-importing the same route adds no new cells, so no refresh runs (correct behaviour). Measure with a different route (`node scripts/make-test-gpx.mjs out.gpx 10 99`).
+- **Soft edge:** user keeps it. Zoomed out, the fixed 14 px blurred line was wider than the corridors and painted them darker than the fog.
+- **Resolution 10 look (user):** the revealed area feels too narrow ("road wide"), and zoomed out it reads as lines rather than places visited.
+
+**Decision (2026-10-29, user): "both".** Reveal two rings of neighbours instead of one (`REVEAL_RADIUS = 2`, corridor ~650 m instead of ~400 m; ~1.7× more cells per km, so the 50k scale arrives sooner). Below zoom 12 the map draws the fog from the res-8 parents of the stored cells (~1 km hexagons), so explored neighbourhoods clear as areas; from zoom 12 it draws the stored res-10 cells. Storage is unchanged (res-10 cells only). The soft edge keeps a constant width on the ground instead of a constant pixel width. Plan 2, Task 9.
 
 ## Verification
 
@@ -159,5 +176,5 @@ If the on-device stress test at 50,000 cells is not acceptable, switch `buildFog
 ## Open questions (report back, don't decide alone)
 
 - Battery use per mode after a real day.
-- Whether resolution 10 looks right, or 9 or 11.
+- Whether resolution 10 looks right, or 9 or 11. (2026-10-29: user found res 10 with one ring too narrow; Task 9 widens the reveal and adds coarse fog when zoomed out. Re-check in the field.)
 - Any iOS behaviour that makes reliable background reveal impossible without a different approach.

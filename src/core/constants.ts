@@ -1,7 +1,7 @@
 /** H3 resolution for stored cells (~76 m average edge; ~83 m near Bangkok). */
 export const H3_RES = 10;
-/** Each revealed path cell also reveals neighbours within this many rings. */
-export const REVEAL_RADIUS = 1;
+/** Each revealed path cell also reveals neighbours within this many rings (2 → corridor ~650 m wide at res 10). */
+export const REVEAL_RADIUS = 2;
 /** Fixes with worse horizontal accuracy are dropped. */
 export const MAX_ACCURACY_M = 50;
 /** Fixes implying a faster speed from the previous accepted fix are dropped. */

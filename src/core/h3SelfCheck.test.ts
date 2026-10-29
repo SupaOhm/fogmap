@@ -6,7 +6,8 @@ test('every h3 self-check passes under Node', () => {
     'latLngToCell',
     'gridDisk',
     'gridPathCells',
-    'cellsToMultiPolygon',
+    'cellToLatLng',
+    'cellToParent',
     'cellArea',
   ]);
   for (const r of results) expect(r).toMatchObject({ ok: true });

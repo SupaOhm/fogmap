@@ -1,29 +1,33 @@
-import { cellsToMultiPolygon } from 'h3-js';
-import type { Feature, MultiPolygon, Position } from 'geojson';
+import { cellToLatLng, cellToParent } from 'h3-js';
 
-// Web Mercator ends at ~85.05°, so this covers everything MapLibre can show.
-export const WORLD_RING: Position[] = [
-  [-180, -85],
-  [180, -85],
-  [180, 85],
-  [-180, 85],
-  [-180, -85],
-];
+export type Bounds = [west: number, south: number, east: number, north: number];
+/** A position in GeoJSON order. */
+export type LngLat = [lng: number, lat: number];
 
-/**
- * Fog as one world polygon with every revealed area as a hole. Unrevealed islands
- * inside a revealed area become separate polygons, since holes cannot nest.
- */
-export function buildFog(cells: string[]): Feature<MultiPolygon> {
-  const outerRings: Position[][] = [];
-  const islands: Position[][][] = [];
-  for (const [outer, ...inner] of cellsToMultiPolygon(cells, true)) {
-    if (outer) outerRings.push(outer);
-    for (const ring of inner) islands.push([ring]);
+/** A cell's centre. The fog is a heatmap of revealed cell centres; hexagons are never drawn. */
+export function cellCentre(cell: string): LngLat {
+  const [lat, lng] = cellToLatLng(cell);
+  return [lng, lat];
+}
+
+/** Bounding box of the points, or null without points. Ignores the antimeridian. */
+export function pointsBounds(points: Iterable<LngLat>): Bounds | null {
+  let west = Infinity;
+  let south = Infinity;
+  let east = -Infinity;
+  let north = -Infinity;
+  for (const [lng, lat] of points) {
+    west = Math.min(west, lng);
+    east = Math.max(east, lng);
+    south = Math.min(south, lat);
+    north = Math.max(north, lat);
   }
-  return {
-    type: 'Feature',
-    properties: {},
-    geometry: { type: 'MultiPolygon', coordinates: [[WORLD_RING, ...outerRings], ...islands] },
-  };
+  return west === Infinity ? null : [west, south, east, north];
+}
+
+/** The unique parents of cells at a coarser resolution, in first-seen order (coarse fog when zoomed out). */
+export function parentCells(cells: Iterable<string>, res: number): string[] {
+  const parents = new Set<string>();
+  for (const c of cells) parents.add(cellToParent(c, res));
+  return [...parents];
 }
